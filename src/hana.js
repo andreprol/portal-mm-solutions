@@ -46,14 +46,24 @@ async function connect() {
 async function query(sql, params = []) {
   if (!conn) await connect();
 
+  // hdb requires prepare+exec for parameterized queries;
+  // @sap/hana-client supports conn.exec(sql, params, cb) directly.
+  if (params.length === 0 || driverName === 'hana-client') {
+    return new Promise((resolve, reject) => {
+      conn.exec(sql, params, (err, rows) => {
+        if (err) { conn = null; reject(err); }
+        else resolve(rows);
+      });
+    });
+  }
+
   return new Promise((resolve, reject) => {
-    conn.exec(sql, params, (err, rows) => {
-      if (err) {
-        conn = null; // force reconnect on next call
-        reject(err);
-      } else {
-        resolve(rows);
-      }
+    conn.prepare(sql, (err, stmt) => {
+      if (err) { conn = null; reject(err); return; }
+      stmt.exec(params, (err2, rows) => {
+        if (err2) { conn = null; reject(err2); }
+        else resolve(rows);
+      });
     });
   });
 }
