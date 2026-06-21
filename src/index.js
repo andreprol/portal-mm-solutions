@@ -189,10 +189,14 @@ async function run() {
         // Take the single lowest-contribution path, but only if it's plausibly
         // close to R$0.01 (within 5x, i.e. < R$0.05). A higher minimum means
         // the error has a different root cause and we cannot pinpoint the ficha.
+        // HANA returns computed columns as strings — parse to Number for comparisons.
         const best = allPaths[0];
-        fallbackRows = (best && (best.contribution || 0) < 0.05) ? [best] : [];
+        const bestContrib = best ? Number(best.contribution) || 0 : Infinity;
+        fallbackRows = bestContrib < 0.05 ? [best] : [];
         if (fallbackRows.length > 0) {
-          console.log(`[hana] fallback found ${fallbackRows.length} path(s) for ${itemCode}@${whsCode} (contributions: ${fallbackRows.map(r => r.contribution?.toFixed(4)).join(', ')})`);
+          console.log(`[hana] fallback found 1 path for ${itemCode}@${whsCode} (contribution: ${bestContrib.toFixed(4)})`);
+        } else if (best) {
+          console.log(`[hana] fallback skipped ${itemCode}@${whsCode} — min contribution R$${bestContrib.toFixed(4)} too high`);
         }
       } catch (e) {
         console.error(`[hana] findBomPathsFallback ${itemCode} failed:`, e.message);
