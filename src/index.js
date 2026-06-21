@@ -193,7 +193,7 @@ async function run() {
     try {
       await email.send(
         config.email.recipients_case1,
-        `[Portal MM] ${case1.length} item(s) sem custo — sem histórico de entrada`,
+        `[Portal MM] Caso 1 — ${case1.length} item(s) sem custo — sem histórico de entrada`,
         email.buildCase1Email(case1)
       );
     } catch (e) {
@@ -206,7 +206,7 @@ async function run() {
       const uniqueProducts = new Set(case2Alert.map(e => e.itemCode)).size;
       await email.send(
         config.email.recipients_case2_alert,
-        `[Portal MM] ${uniqueProducts} produto(s) sem custo — contribuição ínfima em ficha técnica`,
+        `[Portal MM] Caso 2 — ${uniqueProducts} produto(s) sem custo — contribuição ínfima em ficha técnica`,
         email.buildCase2AlertEmail(case2Alert)
       );
     } catch (e) {
