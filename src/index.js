@@ -146,8 +146,9 @@ async function run() {
     if (cached === null) continue;
 
     const { costInfo, bomRows } = cached;
+    // Case 1 uses weekly dedup — "no receiving history" is a slow-moving issue.
+    // Case 2 does NOT dedup — report every cycle while the error exists in ManyFood.
     const dedup1 = db.wasProcessedThisWeek(itemCode, store, 1);
-    const dedup2 = db.wasProcessedThisWeek(itemCode, store, 2);
 
     if (!costInfo.hasCost) {
       // Case 1 — OITW.AvgPrice = 0 at the store's warehouse → no receiving history at this location
@@ -156,40 +157,29 @@ async function run() {
         db.markProcessed(itemCode, store, 1, 'alert');
       }
     } else if (bomRows.length > 0) {
-      // Case 2 — has cost at the warehouse but BOM contribution is negligible (Price > 0, qty × price < 0.01)
+      // Case 2 — has cost but BOM contribution < R$0.01 → ficha técnica issue
       if (config.phase >= 2) {
-        if (!dedup2) {
-          const results = [];
-          for (const bom of bomRows) {
-            try {
-              await hana.removeFromBom(itemCode, bom.bomParent, config.hana.database);
-              results.push({ ...group, bomParent: bom.bomParent, success: true });
-            } catch (e) {
-              results.push({ ...group, bomParent: bom.bomParent, success: false, error: e.message });
-            }
+        const results = [];
+        for (const bom of bomRows) {
+          try {
+            await hana.removeFromBom(itemCode, bom.bomParent, config.hana.database);
+            results.push({ ...group, bomParent: bom.bomParent, success: true });
+          } catch (e) {
+            results.push({ ...group, bomParent: bom.bomParent, success: false, error: e.message });
           }
-          case2Action.push(...results);
-          db.markProcessed(itemCode, store, 2, 'auto-removed');
         }
+        case2Action.push(...results);
       } else {
-        if (!dedup2) {
-          case2Alert.push({ ...group, bomRows });
-          db.markProcessed(itemCode, store, 2, 'alerted');
-        }
+        case2Alert.push({ ...group, bomRows });
       }
     } else {
-      // hasCost=true but strict check (Qty × AvgPrice < R$0.01) returned 0 rows.
-      // The ManyFood log is authoritative: the error exists and there IS a ficha that caused it.
-      // Most likely cause: OITW.AvgPrice was lower on the error date (moving average dipped).
-      // When ManyFood reprocesses that date it will use the historical cost → same error recurs.
-      // Solution: find the lowest-contribution BOM paths (most likely culprits) and report them.
+      // hasCost=true but strict check returned 0 rows — price may have dipped on the error date.
+      // Use fallback to find the lowest-contribution path as the most likely culprit.
       let fallbackRows = [];
       try {
         const allPaths = await hana.findBomPathsFallback(itemCode, whsCode, config.hana.database);
-        // Take the single lowest-contribution path, but only if it's plausibly
-        // close to R$0.01 (within 5x, i.e. < R$0.05). A higher minimum means
-        // the error has a different root cause and we cannot pinpoint the ficha.
-        // HANA returns computed columns as strings — parse to Number for comparisons.
+        // HANA returns computed columns as strings — parse to Number.
+        // Only report if contribution is plausibly close to R$0.01 (< R$0.05 = within 5x).
         const best = allPaths[0];
         const bestContrib = best ? Number(best.contribution) || 0 : Infinity;
         fallbackRows = bestContrib < 0.05 ? [best] : [];
@@ -202,10 +192,7 @@ async function run() {
         console.error(`[hana] findBomPathsFallback ${itemCode} failed:`, e.message);
       }
 
-      if (!dedup2) {
-        case2Alert.push({ ...group, bomRows: fallbackRows });
-        db.markProcessed(itemCode, store, 2, fallbackRows.length > 0 ? 'momentary' : 'no-bom-found');
-      }
+      case2Alert.push({ ...group, bomRows: fallbackRows });
     }
   }
 
