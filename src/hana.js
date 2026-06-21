@@ -68,9 +68,11 @@ async function query(sql, params = []) {
   });
 }
 
-// Case 1: check whether the item has any cost (AvgPrice > 0) in any warehouse.
-// Returns: { hasCost: bool, warehouses: [...] }
-async function checkItemCost(itemCode, database) {
+// Case 1: check whether the item has cost (AvgPrice > 0) in a specific warehouse.
+// whsCode must match the SAP OITW.WhsCode for the store where the error occurred
+// (e.g. store "6 - Cittá" → whsCode "06").
+// Returns: { hasCost: bool, whsAvgPrice: number, warehouses: [...] }
+async function checkItemCost(itemCode, whsCode, database) {
   const sql = `
     SELECT T0."ItemCode", T0."WhsCode", T0."AvgPrice", T0."OnHand"
     FROM "${database}"."OITW" T0
@@ -78,8 +80,10 @@ async function checkItemCost(itemCode, database) {
   `;
   const rows = await query(sql, [itemCode]);
 
-  const hasCost = rows.some(r => (r.AvgPrice || r['AvgPrice'] || 0) > 0);
-  return { hasCost, warehouses: rows };
+  const whsRow = rows.find(r => r.WhsCode === whsCode || r['WhsCode'] === whsCode);
+  const whsAvgPrice = whsRow ? (whsRow.AvgPrice || whsRow['AvgPrice'] || 0) : 0;
+  const hasCost = whsAvgPrice > 0;
+  return { hasCost, whsAvgPrice, warehouses: rows };
 }
 
 // Case 2: check whether the item appears in any BOM (ITT1) with a negligible

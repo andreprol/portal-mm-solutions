@@ -19,6 +19,15 @@ function portalDateToIso(s) {
   return `${y}-${m}-${d}`;
 }
 
+// "6 - Cittá Delirio Restaurante" → "06"
+// "14 - Delirio Tropical Niteroi Plaza" → "14"
+function storeToWhsCode(storeName) {
+  const match = storeName.match(/^(\d+)\s*-/);
+  if (!match) return null;
+  const n = parseInt(match[1], 10);
+  return String(n).padStart(2, '0');
+}
+
 // Compares two DD/MM/YYYY date strings, returning the earlier one.
 function minDate(a, b) {
   return portalDateToIso(a) <= portalDateToIso(b) ? a : b;
@@ -88,17 +97,23 @@ async function run() {
     return;
   }
 
-  // --- Step 2: classify each unique itemCode via HANA (one query per item) ---
-  const uniqueItemCodes = [...new Set([...errorMap.values()].map(e => e.itemCode))];
+  // --- Step 2: classify each unique (itemCode, store) pair via HANA ---
+  // HANA check is per-pair because the same item may have cost at one store but not another.
+  // WhsCode is derived from the ManyFood store name number prefix (e.g. "6 - Cittá" → "06").
   const hanaCache = {};
 
-  for (const itemCode of uniqueItemCodes) {
+  for (const [key, group] of errorMap) {
+    const { itemCode, store } = group;
+    const whsCode = storeToWhsCode(store);
+
     let costInfo;
     try {
-      costInfo = await hana.checkItemCost(itemCode, config.hana.database);
+      costInfo = await hana.checkItemCost(itemCode, whsCode, config.hana.database);
     } catch (e) {
-      console.error(`[hana] checkItemCost ${itemCode} failed:`, e.message);
-      costInfo = { hasCost: false, warehouses: [] };
+      console.error(`[hana] checkItemCost ${itemCode}@${whsCode} failed:`, e.message);
+      // HANA error: skip this pair to avoid false Case 1 alerts
+      hanaCache[key] = null;
+      continue;
     }
 
     let bomRows = [];
@@ -117,7 +132,7 @@ async function run() {
       }
     }
 
-    hanaCache[itemCode] = { costInfo, bomRows };
+    hanaCache[key] = { costInfo, bomRows };
   }
 
   // --- Step 3: route each group to Case 1 or Case 2, applying weekly dedup ---
@@ -125,21 +140,25 @@ async function run() {
   const case2Alert  = [];
   const case2Action = [];
 
-  for (const [, group] of errorMap) {
+  for (const [key, group] of errorMap) {
     const { itemCode, store } = group;
-    const { costInfo, bomRows } = hanaCache[itemCode];
+    const cached = hanaCache[key];
 
+    // HANA query failed for this pair — skip to avoid false positives
+    if (cached === null) continue;
+
+    const { costInfo, bomRows } = cached;
     const dedup1 = db.wasProcessedThisWeek(itemCode, store, 1);
     const dedup2 = db.wasProcessedThisWeek(itemCode, store, 2);
 
     if (!costInfo.hasCost) {
-      // Case 1 — no purchase history anywhere
+      // Case 1 — OITW.AvgPrice = 0 at the store's warehouse → no receiving history at this location
       if (!dedup1) {
         case1.push(group);
         db.markProcessed(itemCode, store, 1, 'alert');
       }
     } else if (bomRows.length > 0) {
-      // Case 2 — has cost but BOM contribution is negligible (Price > 0, qty × price < 0.01)
+      // Case 2 — has cost at the warehouse but BOM contribution is negligible (Price > 0, qty × price < 0.01)
       if (config.phase >= 2) {
         if (!dedup2) {
           const results = [];
@@ -160,13 +179,9 @@ async function run() {
           db.markProcessed(itemCode, store, 2, 'alerted');
         }
       }
-    } else {
-      // Has cost in OITW but no negligible-BOM match — cause unknown, alert as Case 1
-      if (!dedup1) {
-        case1.push(group);
-        db.markProcessed(itemCode, store, 1, 'alert-unknown');
-      }
     }
+    // else: has cost at this warehouse AND no BOM issue → ManyFood error is historical/timing,
+    // item will self-resolve once the reconciliation date is reprocessed. No alert needed.
   }
 
   // --- Step 4: send emails ---
