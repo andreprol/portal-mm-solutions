@@ -179,14 +179,13 @@ async function run() {
       try {
         const allPaths = await hana.findBomPathsFallback(itemCode, whsCode, config.hana.database);
         // HANA returns computed columns as strings — parse to Number.
-        // Only report if contribution is plausibly close to R$0.01 (< R$0.05 = within 5x).
+        // Strict check found nothing < R$0.01 today, but the ManyFood error is real.
+        // Report the single lowest-contribution path as the most likely historical culprit.
         const best = allPaths[0];
-        const bestContrib = best ? Number(best.contribution) || 0 : Infinity;
-        fallbackRows = bestContrib < 0.05 ? [best] : [];
+        const bestContrib = best ? Number(best.contribution) || 0 : 0;
+        fallbackRows = best ? [best] : [];
         if (fallbackRows.length > 0) {
           console.log(`[hana] fallback found 1 path for ${itemCode}@${whsCode} (contribution: ${bestContrib.toFixed(4)})`);
-        } else if (best) {
-          console.log(`[hana] fallback skipped ${itemCode}@${whsCode} — min contribution R$${bestContrib.toFixed(4)} too high`);
         }
       } catch (e) {
         console.error(`[hana] findBomPathsFallback ${itemCode} failed:`, e.message);
