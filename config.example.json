@@ -1,0 +1,28 @@
+{
+  "schedule": "0 */4 * * *",
+  "lookbackDays": 7,
+  "manyfood": {
+    "url": "https://manyfood.manyminds.com.br",
+    "user": "your_user",
+    "password": "your_password"
+  },
+  "hana": {
+    "host": "10.x.x.x",
+    "port": 30015,
+    "user": "DBUSER",
+    "password": "dbpassword",
+    "database": "SBO_DATABASE_PRD"
+  },
+  "graph": {
+    "tenantId": "your-tenant-id",
+    "clientId": "your-client-id",
+    "clientSecret": "your-client-secret",
+    "fromEmail": "alerts@yourdomain.com"
+  },
+  "email": {
+    "recipients_case1": ["admin@yourdomain.com"],
+    "recipients_case2_alert": ["admin@yourdomain.com"],
+    "recipients_case2_action": ["admin@yourdomain.com"]
+  },
+  "phase": 1
+}

@@ -1,0 +1,22 @@
+{
+  "name": "portal-mm-solutions",
+  "version": "1.0.0",
+  "description": "Automated monitor and fixer for ManyFood portal integration errors (item without cost) blocking Aloha→SAP B1 daily reconciliation",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": ["sap", "b1", "aloha", "manyfood", "reconciliation", "automation"],
+  "author": "Delirio Tropical",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "axios": "^1.7.7",
+    "axios-cookiejar-support": "^4.0.7",
+    "better-sqlite3": "^11.3.0",
+    "node-cron": "^3.0.3",
+    "tough-cookie": "^4.1.4",
+    "qs": "^6.13.0"
+  }
+}
