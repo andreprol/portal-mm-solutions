@@ -1,11 +1,16 @@
-let hdb;
+// Supports both @sap/hana-client (createConnection) and hdb (createClient)
+let driver = null;
+let driverName = null;
+
 try {
-  hdb = require('@sap/hana-client');
+  driver = require('@sap/hana-client');
+  driverName = 'hana-client';
 } catch {
   try {
-    hdb = require('hdb');
+    driver = require('hdb');
+    driverName = 'hdb';
   } catch {
-    hdb = null;
+    driver = null;
   }
 }
 
@@ -17,21 +22,24 @@ function init(cfg) {
 }
 
 async function connect() {
-  if (!hdb) throw new Error('No HANA driver found. Run: npm install @sap/hana-client');
+  if (!driver) throw new Error('No HANA driver found. Run: npm install hdb');
 
   if (conn) {
     try { conn.disconnect(); } catch {}
     conn = null;
   }
 
-  conn = hdb.createConnection();
+  const params = { host: config.host, port: config.port, user: config.user, password: config.password };
+
   await new Promise((resolve, reject) => {
-    conn.connect({
-      host: config.host,
-      port: config.port,
-      user: config.user,
-      password: config.password,
-    }, err => err ? reject(err) : resolve());
+    if (driverName === 'hana-client') {
+      conn = driver.createConnection();
+      conn.connect(params, err => err ? reject(err) : resolve());
+    } else {
+      // hdb npm package
+      conn = driver.createClient(params);
+      conn.connect(err => err ? reject(err) : resolve());
+    }
   });
 }
 
