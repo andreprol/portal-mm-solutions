@@ -8,22 +8,29 @@ const db = require('./db');
 hana.init(config.hana);
 email.init(config.graph, config.graph.fromEmail);
 
-// Returns a 'YYYY-MM-DD' date string offset by N days from today
 function dateOffset(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
 }
 
-// Converts portal date format 'DD/MM/YYYY' to ISO 'YYYY-MM-DD'
 function portalDateToIso(s) {
   const [d, m, y] = s.split('/');
   return `${y}-${m}-${d}`;
 }
 
+// Compares two DD/MM/YYYY date strings, returning the earlier one.
+function minDate(a, b) {
+  return portalDateToIso(a) <= portalDateToIso(b) ? a : b;
+}
+function maxDate(a, b) {
+  return portalDateToIso(a) >= portalDateToIso(b) ? a : b;
+}
+
 async function run() {
   console.log(`[runner] starting check at ${new Date().toISOString()}`);
 
+  // --- Step 1: login once, then collect errors from every configured store ---
   try {
     await manyfood.login(config.manyfood.user, config.manyfood.password);
   } catch (err) {
@@ -31,60 +38,73 @@ async function run() {
     return;
   }
 
-  const dateEnd = dateOffset(0);
-  const dateStart = dateOffset(-(config.lookbackDays || 7));
+  const dateEnd   = dateOffset(0);
+  const dateStart = dateOffset(-(config.lookbackDays || 90));
 
-  let rawErrors;
-  try {
-    rawErrors = await manyfood.getErrorsForPeriod(dateStart, dateEnd);
-  } catch (err) {
-    console.error('[runner] failed to fetch errors:', err.message);
-    return;
+  const filiais = config.filiais || [];
+  if (filiais.length === 0) {
+    console.warn('[runner] config.filiais is empty — add store IDs to config.json');
   }
 
-  const zeroCostErrors = manyfood.parseZeroCostErrors(rawErrors);
-  console.log(`[runner] ${rawErrors.length} total errors, ${zeroCostErrors.length} zero-cost`);
+  // Collect all zero-cost errors across all stores.
+  // Key: `${itemCode}|${store}` → grouped error record.
+  const errorMap = new Map();
 
-  if (zeroCostErrors.length === 0) {
-    console.log('[runner] no zero-cost item errors found. Done.');
-    return;
-  }
-
-  const case1 = [];
-  const case2Alert = [];
-  const case2Action = [];
-
-  for (const err of zeroCostErrors) {
-    const isoDate = portalDateToIso(err.date);
-    const dedup1 = db.wasProcessedToday(err.itemCode, err.store, isoDate, 1);
-    const dedup2 = db.wasProcessedToday(err.itemCode, err.store, isoDate, 2);
-
-    let costInfo;
+  for (const filial of filiais) {
     try {
-      costInfo = await hana.checkItemCost(err.itemCode, config.hana.database);
-    } catch (e) {
-      console.error(`[hana] checkItemCost ${err.itemCode} failed:`, e.message);
+      await manyfood.switchFilial(filial.id);
+    } catch (err) {
+      console.error(`[runner] switchFilial ${filial.id} failed:`, err.message);
       continue;
     }
 
-    if (!costInfo.hasCost) {
-      // Case 1 — item has no purchase history at this store, no OITW record
-      if (!dedup1) {
-        case1.push(err);
-        db.markProcessed(err.itemCode, err.store, isoDate, 1, 'alert');
-      }
-    } else {
-      // Item has cost globally — check if it appears in a BOM with negligible contribution
-      let bomRows;
-      try {
-        bomRows = await hana.checkBomContribution(err.itemCode, config.hana.database);
-      } catch (e) {
-        console.error(`[hana] checkBomContribution ${err.itemCode} failed:`, e.message);
-        continue;
-      }
+    let rawErrors;
+    try {
+      rawErrors = await manyfood.getErrorsForPeriod(dateStart, dateEnd);
+    } catch (err) {
+      console.error(`[runner] getErrorsForPeriod filial ${filial.id} failed:`, err.message);
+      continue;
+    }
 
-      if (bomRows.length > 0) {
-        // Enrich each BOM row with nested BOM context (ficha técnica dentro de ficha técnica)
+    const zeroCost = manyfood.parseZeroCostErrors(rawErrors);
+    console.log(`[runner] filial ${filial.id} (${filial.nome}): ${rawErrors.length} total, ${zeroCost.length} zero-cost`);
+
+    for (const err of zeroCost) {
+      const key = `${err.itemCode}|${err.store}`;
+      if (!errorMap.has(key)) {
+        errorMap.set(key, { ...err, firstDate: err.date, lastDate: err.date, occurrences: 1 });
+      } else {
+        const g = errorMap.get(key);
+        g.firstDate   = minDate(g.firstDate, err.date);
+        g.lastDate    = maxDate(g.lastDate, err.date);
+        g.occurrences += 1;
+      }
+    }
+  }
+
+  console.log(`[runner] ${errorMap.size} unique item+store pairs with zero-cost errors`);
+  if (errorMap.size === 0) {
+    console.log('[runner] no zero-cost errors found. Done.');
+    return;
+  }
+
+  // --- Step 2: classify each unique itemCode via HANA (one query per item) ---
+  const uniqueItemCodes = [...new Set([...errorMap.values()].map(e => e.itemCode))];
+  const hanaCache = {};
+
+  for (const itemCode of uniqueItemCodes) {
+    let costInfo;
+    try {
+      costInfo = await hana.checkItemCost(itemCode, config.hana.database);
+    } catch (e) {
+      console.error(`[hana] checkItemCost ${itemCode} failed:`, e.message);
+      costInfo = { hasCost: false, warehouses: [] };
+    }
+
+    let bomRows = [];
+    if (costInfo.hasCost) {
+      try {
+        bomRows = await hana.checkBomContribution(itemCode, config.hana.database);
         for (const bom of bomRows) {
           try {
             bom.nestedIn = await hana.checkNestedBom(bom.bomParent, config.hana.database);
@@ -92,39 +112,64 @@ async function run() {
             bom.nestedIn = [];
           }
         }
+      } catch (e) {
+        console.error(`[hana] checkBomContribution ${itemCode} failed:`, e.message);
+      }
+    }
 
-        // Case 2 — negligible BOM contribution causes SAP to treat item as zero-cost
-        if (config.phase >= 2) {
-          if (!dedup2) {
-            const results = [];
-            for (const bom of bomRows) {
-              try {
-                await hana.removeFromBom(err.itemCode, bom.bomParent, config.hana.database);
-                results.push({ ...err, bomParent: bom.bomParent, success: true });
-              } catch (e) {
-                results.push({ ...err, bomParent: bom.bomParent, success: false, error: e.message });
-              }
+    hanaCache[itemCode] = { costInfo, bomRows };
+  }
+
+  // --- Step 3: route each group to Case 1 or Case 2, applying weekly dedup ---
+  const case1       = [];
+  const case2Alert  = [];
+  const case2Action = [];
+
+  for (const [, group] of errorMap) {
+    const { itemCode, store } = group;
+    const { costInfo, bomRows } = hanaCache[itemCode];
+
+    const dedup1 = db.wasProcessedThisWeek(itemCode, store, 1);
+    const dedup2 = db.wasProcessedThisWeek(itemCode, store, 2);
+
+    if (!costInfo.hasCost) {
+      // Case 1 — no purchase history anywhere
+      if (!dedup1) {
+        case1.push(group);
+        db.markProcessed(itemCode, store, 1, 'alert');
+      }
+    } else if (bomRows.length > 0) {
+      // Case 2 — has cost but BOM contribution is negligible (Price > 0, qty × price < 0.01)
+      if (config.phase >= 2) {
+        if (!dedup2) {
+          const results = [];
+          for (const bom of bomRows) {
+            try {
+              await hana.removeFromBom(itemCode, bom.bomParent, config.hana.database);
+              results.push({ ...group, bomParent: bom.bomParent, success: true });
+            } catch (e) {
+              results.push({ ...group, bomParent: bom.bomParent, success: false, error: e.message });
             }
-            case2Action.push(...results);
-            db.markProcessed(err.itemCode, err.store, isoDate, 2, 'auto-removed');
           }
-        } else {
-          // Phase 1 — alert only, manual removal required
-          if (!dedup2) {
-            case2Alert.push({ ...err, bomRows });
-            db.markProcessed(err.itemCode, err.store, isoDate, 2, 'alerted');
-          }
+          case2Action.push(...results);
+          db.markProcessed(itemCode, store, 2, 'auto-removed');
         }
       } else {
-        // BOM contribution passes the threshold but item still shows zero-cost — unknown cause
-        if (!dedup1) {
-          case1.push(err);
-          db.markProcessed(err.itemCode, err.store, isoDate, 1, 'alert-unknown');
+        if (!dedup2) {
+          case2Alert.push({ ...group, bomRows });
+          db.markProcessed(itemCode, store, 2, 'alerted');
         }
+      }
+    } else {
+      // Has cost in OITW but no negligible-BOM match — cause unknown, alert as Case 1
+      if (!dedup1) {
+        case1.push(group);
+        db.markProcessed(itemCode, store, 1, 'alert-unknown');
       }
     }
   }
 
+  // --- Step 4: send emails ---
   if (case1.length > 0) {
     try {
       await email.send(
@@ -164,7 +209,6 @@ async function run() {
   console.log(`[runner] done. case1=${case1.length} case2alert=${case2Alert.length} case2action=${case2Action.length}`);
 }
 
-// Run immediately on startup, then repeat on the configured cron schedule
 run().catch(err => console.error('[runner] unhandled error:', err));
 
 cron.schedule(config.schedule, () => {

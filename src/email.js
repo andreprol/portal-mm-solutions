@@ -69,7 +69,9 @@ function buildCase1Email(errors) {
       <td>${e.itemCode}</td>
       <td>${e.itemName}</td>
       <td>${e.store}</td>
-      <td>${e.date}</td>
+      <td>${e.firstDate}</td>
+      <td>${e.lastDate}</td>
+      <td style="text-align:center">${e.occurrences}</td>
     </tr>`
   ).join('');
 
@@ -80,7 +82,7 @@ function buildCase1Email(errors) {
     Não há correção automática possível — é necessária revisão manual no SAP.</p>
     <table>
       <thead>
-        <tr><th>Código</th><th>Descrição</th><th>Loja</th><th>Data</th></tr>
+        <tr><th>Código</th><th>Descrição</th><th>Loja</th><th>Primeira Ocorrência</th><th>Última Ocorrência</th><th>Dias c/ Erro</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
@@ -106,7 +108,9 @@ function buildCase2AlertEmail(errors) {
       <td>${e.itemCode}</td>
       <td>${e.itemName}</td>
       <td>${e.store}</td>
-      <td>${e.date}</td>
+      <td>${e.firstDate}</td>
+      <td>${e.lastDate}</td>
+      <td style="text-align:center">${e.occurrences}</td>
       <td>${bomLines}</td>
     </tr>`;
   }).join('');
@@ -118,7 +122,7 @@ function buildCase2AlertEmail(errors) {
     <strong>inferior a R$0,01</strong>. O SAP interpreta isso como "sem custo" e bloqueia a conciliação do dia.</p>
     <table>
       <thead>
-        <tr><th>Código</th><th>Descrição</th><th>Loja</th><th>Data</th><th>Ficha(s) Técnica(s)</th></tr>
+        <tr><th>Código</th><th>Descrição</th><th>Loja</th><th>Primeira Ocorrência</th><th>Última Ocorrência</th><th>Dias c/ Erro</th><th>Ficha(s) Técnica(s)</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>

@@ -1,6 +1,15 @@
 {
   "schedule": "0 */4 * * *",
-  "lookbackDays": 7,
+  "lookbackDays": 90,
+  "filiais": [
+    {"id": 470, "nome": "6 - Cittá Delirio Restaurante"},
+    {"id": 472, "nome": "5 - Delirio Gávea Restaurante"},
+    {"id": 473, "nome": "9 - Delirio Metropolitano"},
+    {"id": 474, "nome": "8 - Delirio Rio Sul Restaurante"},
+    {"id": 476, "nome": "1 - Delirio Tropical S/A."},
+    {"id": 477, "nome": "7 - Delitrop Restaurante"},
+    {"id": 478, "nome": "4 - Garcia Trop Restaurante"}
+  ],
   "manyfood": {
     "url": "https://manyfood.manyminds.com.br",
     "user": "your_user",

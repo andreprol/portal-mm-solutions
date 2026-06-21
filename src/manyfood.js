@@ -110,6 +110,17 @@ function parseZeroCostErrors(errors) {
   return results;
 }
 
+// Switches the active store context for this session.
+// Must be called before getErrorsForPeriod to scope results to the desired store.
+// filialId: numeric ManyFood store ID (see config.filiais)
+async function switchFilial(filialId) {
+  if (!client) buildClient();
+  const csrfToken = await getCsrfToken();
+  await client.post(`/Principal/requisicaoMudaEmpresa/${filialId}`, qs.stringify({
+    ci_csrf_token: csrfToken,
+  }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+}
+
 // Fetches the day detail from the monitoring grid.
 // Used in Phase 2 to trigger reconciliation resend after a BOM fix.
 // date format: 'YYYY-MM-DD', storeId: numeric string from portal
@@ -121,4 +132,4 @@ async function getDayDetail(date, storeId) {
   return data;
 }
 
-module.exports = { login, getErrorsForPeriod, parseZeroCostErrors, getDayDetail };
+module.exports = { login, switchFilial, getErrorsForPeriod, parseZeroCostErrors, getDayDetail };
