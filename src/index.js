@@ -218,9 +218,10 @@ async function run() {
 
   if (case2Alert.length > 0) {
     try {
+      const uniqueProducts = new Set(case2Alert.map(e => e.itemCode)).size;
       await email.send(
         config.email.recipients_case2_alert,
-        `[Portal MM] ${case2Alert.length} item(s) sem custo — contribuição ínfima em ficha técnica`,
+        `[Portal MM] ${uniqueProducts} produto(s) sem custo — contribuição ínfima em ficha técnica`,
         email.buildCase2AlertEmail(case2Alert)
       );
     } catch (e) {
