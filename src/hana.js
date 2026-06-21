@@ -85,6 +85,9 @@ async function checkItemCost(itemCode, database) {
 // Case 2: check whether the item appears in any BOM (ITT1) with a negligible
 // cost contribution (quantity × price < 0.01), which SAP treats as zero cost.
 // In ITT1: "Father" = parent BOM code, "Code" = component item code (not "ItemCode").
+// Price > 0 filter is mandatory: items with no purchase history at BOM creation time
+// have ITT1.Price = 0, causing every BOM they appear in to return contribution = 0.
+// Those belong in Case 1 (no purchase history), not Case 2 (negligible contribution).
 // Returns: [{ bomParent, component, quantity, price, contribution }]
 async function checkBomContribution(itemCode, database) {
   const sql = `
@@ -96,9 +99,25 @@ async function checkBomContribution(itemCode, database) {
       T0."Quantity" * T0."Price" AS "contribution"
     FROM "${database}"."ITT1" T0
     WHERE T0."Code" = ?
+      AND T0."Price" > 0
       AND T0."Quantity" * T0."Price" < 0.01
   `;
   return await query(sql, [itemCode]);
+}
+
+// Nested BOM check: verifies whether a BOM parent (Father) is itself a component
+// in another BOM — i.e., the Delirio Tropical multi-level recipe structure.
+// Returns: [{ grandParent, quantity, price }]
+async function checkNestedBom(bomCode, database) {
+  const sql = `
+    SELECT
+      T0."Father"   AS "grandParent",
+      T0."Quantity" AS "quantity",
+      T0."Price"    AS "price"
+    FROM "${database}"."ITT1" T0
+    WHERE T0."Code" = ?
+  `;
+  return await query(sql, [bomCode]);
 }
 
 // Phase 2: remove the item from a BOM (ITT1 row) by parent + component.
@@ -107,4 +126,4 @@ async function removeFromBom(itemCode, bomParent, database) {
   await query(sql, [bomParent, itemCode]);
 }
 
-module.exports = { init, connect, checkItemCost, checkBomContribution, removeFromBom };
+module.exports = { init, connect, checkItemCost, checkBomContribution, checkNestedBom, removeFromBom };

@@ -84,6 +84,15 @@ async function run() {
       }
 
       if (bomRows.length > 0) {
+        // Enrich each BOM row with nested BOM context (ficha técnica dentro de ficha técnica)
+        for (const bom of bomRows) {
+          try {
+            bom.nestedIn = await hana.checkNestedBom(bom.bomParent, config.hana.database);
+          } catch (e) {
+            bom.nestedIn = [];
+          }
+        }
+
         // Case 2 — negligible BOM contribution causes SAP to treat item as zero-cost
         if (config.phase >= 2) {
           if (!dedup2) {
@@ -120,7 +129,7 @@ async function run() {
     try {
       await email.send(
         config.email.recipients_case1,
-        `[Portal MM] ${case1.length} item(s) without cost — no purchase history`,
+        `[Portal MM] ${case1.length} item(s) sem custo — sem histórico de entrada`,
         email.buildCase1Email(case1)
       );
     } catch (e) {
@@ -132,7 +141,7 @@ async function run() {
     try {
       await email.send(
         config.email.recipients_case2_alert,
-        `[Portal MM] ${case2Alert.length} item(s) without cost — negligible BOM contribution`,
+        `[Portal MM] ${case2Alert.length} item(s) sem custo — contribuição ínfima em ficha técnica`,
         email.buildCase2AlertEmail(case2Alert)
       );
     } catch (e) {
@@ -144,7 +153,7 @@ async function run() {
     try {
       await email.send(
         config.email.recipients_case2_action,
-        `[Portal MM] Auto-removal report — ${case2Action.filter(r => r.success).length} BOM entries removed`,
+        `[Portal MM] Relatório de remoção automática — ${case2Action.filter(r => r.success).length} entrada(s) de ficha técnica removida(s)`,
         email.buildCase2ActionEmail(case2Action)
       );
     } catch (e) {
