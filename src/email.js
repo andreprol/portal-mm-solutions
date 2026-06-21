@@ -97,26 +97,43 @@ function buildCase1Email(errors) {
 
 function buildCase2AlertEmail(errors) {
   // --- Section 1: deduplicated ficha fixes across all stores ---
+  // L1: key = (itemCode, bomParent) — one row per direct ficha
+  // L2: key = (itemCode, via/sub-receita) — one row per sub-receita, listing all affected fichas
   const fichasMap = new Map();
   for (const e of errors) {
     for (const b of e.bomRows) {
-      const key = `${e.itemCode}|${b.level}|${b.bomParent}|${b.via || ''}`;
-      if (!fichasMap.has(key)) {
-        fichasMap.set(key, {
-          itemCode:  e.itemCode,
-          itemName:  e.itemName,
-          level:     b.level,
-          bomParent: b.bomParent,
-          via:       b.via || null,
-        });
+      if (b.level === 'L1') {
+        const key = `L1|${e.itemCode}|${b.bomParent}`;
+        if (!fichasMap.has(key)) {
+          fichasMap.set(key, {
+            level: 'L1', itemCode: e.itemCode, itemName: e.itemName,
+            target: b.bomParent, affectedFichas: null,
+          });
+        }
+      } else {
+        // L2: remove the item from the sub-recipe (via); list grandparent fichas as context
+        const key = `L2|${e.itemCode}|${b.via}`;
+        if (!fichasMap.has(key)) {
+          fichasMap.set(key, {
+            level: 'L2', itemCode: e.itemCode, itemName: e.itemName,
+            target: b.via, affectedFichas: new Set([b.bomParent]),
+          });
+        } else {
+          fichasMap.get(key).affectedFichas.add(b.bomParent);
+        }
       }
     }
   }
 
   const fichaRows = [...fichasMap.values()].map(f => {
-    const acao = f.level === 'L2'
-      ? `Remover sub-receita <strong>${f.via}</strong> da ficha <strong>${f.bomParent}</strong>`
-      : `Remover item da ficha <strong>${f.bomParent}</strong>`;
+    let acao;
+    if (f.level === 'L1') {
+      acao = `Remover item da ficha <strong>${f.target}</strong>`;
+    } else {
+      const fichas = [...f.affectedFichas].sort().join(', ');
+      acao = `Remover item da sub-receita <strong>${f.target}</strong>`
+           + `<div class="nested">Afeta fichas: ${fichas}</div>`;
+    }
     return `<tr>
       <td>${f.itemCode}</td>
       <td>${f.itemName}</td>
