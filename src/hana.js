@@ -86,17 +86,30 @@ async function checkItemCost(itemCode, whsCode, database) {
   return { hasCost, whsAvgPrice, warehouses: rows };
 }
 
-// Case 2: item appears in a BOM (ITT1) with a negligible cost contribution.
-// Contribution = ITT1.Quantity × OITW.AvgPrice (current real cost at the store's depot).
-// ITT1.Price is a frozen value from BOM creation and is NOT used here.
-// whsCode must be the depot for the store where the ManyFood error occurred.
-// Returns: [{ bomParent, component, quantity, currentPrice, contribution }]
+// Case 2: item appears in a BOM (ITT1) with negligible cost contribution.
+//
+// Contribution uses OITW.AvgPrice (current real cost at the store depot), NOT ITT1.Price.
+// Delírio Tropical BOMs have at most 2 levels: item → sub-recipe (250xxx) → final product.
+//
+// Level 1 — item directly in a ficha técnica:
+//   contribution = ITT1.Quantity × OITW.AvgPrice
+//
+// Level 2 — item in sub-recipe, sub-recipe in another ficha:
+//   effective contribution = Qty_subRecipe_in_parent × Qty_item_in_subRecipe × OITW.AvgPrice
+//   (e.g. 0.02 × 0.01 × R$20 = R$0.004 < R$0.01 even though item alone gives R$0.20)
+//
+// Returns: [{ level, bomParent, via, qty1, qty2, currentPrice, contribution }]
+//   level:     'L1' (direct) | 'L2' (nested via sub-recipe)
+//   bomParent: the ficha técnica that needs the fix
+//   via:       sub-recipe code (L2 only) — the intermediate BOM containing the item
 async function checkBomContribution(itemCode, whsCode, database) {
   const sql = `
     SELECT
+      'L1'                               AS "level",
       T0."Father"                        AS "bomParent",
-      T0."Code"                          AS "component",
-      T0."Quantity"                      AS "quantity",
+      NULL                               AS "via",
+      T0."Quantity"                      AS "qty1",
+      NULL                               AS "qty2",
       T1."AvgPrice"                      AS "currentPrice",
       T0."Quantity" * T1."AvgPrice"      AS "contribution"
     FROM "${database}"."ITT1" T0
@@ -106,29 +119,36 @@ async function checkBomContribution(itemCode, whsCode, database) {
     WHERE T0."Code" = ?
       AND T1."AvgPrice" > 0
       AND T0."Quantity" * T1."AvgPrice" < 0.01
-  `;
-  return await query(sql, [whsCode, itemCode]);
-}
 
-// Nested BOM check: verifies whether a BOM parent (Father) is itself a component
-// in another BOM — i.e., the Delirio Tropical multi-level recipe structure.
-// Returns: [{ grandParent, quantity, price }]
-async function checkNestedBom(bomCode, database) {
-  const sql = `
+    UNION ALL
+
     SELECT
-      T0."Father"   AS "grandParent",
-      T0."Quantity" AS "quantity",
-      T0."Price"    AS "price"
+      'L2'                                          AS "level",
+      T2."Father"                                   AS "bomParent",
+      T0."Father"                                   AS "via",
+      T0."Quantity"                                 AS "qty1",
+      T2."Quantity"                                 AS "qty2",
+      T1."AvgPrice"                                 AS "currentPrice",
+      T2."Quantity" * T0."Quantity" * T1."AvgPrice" AS "contribution"
     FROM "${database}"."ITT1" T0
+    INNER JOIN "${database}"."OITW" T1
+      ON T1."ItemCode" = T0."Code"
+     AND T1."WhsCode" = ?
+    INNER JOIN "${database}"."ITT1" T2
+      ON T2."Code" = T0."Father"
     WHERE T0."Code" = ?
+      AND T1."AvgPrice" > 0
+      AND T2."Quantity" * T0."Quantity" * T1."AvgPrice" < 0.01
   `;
-  return await query(sql, [bomCode]);
+  return await query(sql, [whsCode, itemCode, whsCode, itemCode]);
 }
 
-// Phase 2: remove the item from a BOM (ITT1 row) by parent + component.
+// Phase 2: remove an entry from ITT1.
+// For L1: remove item from its direct ficha técnica (bomParent).
+// For L2: remove the sub-recipe (via) from the grandparent ficha (bomParent).
 async function removeFromBom(itemCode, bomParent, database) {
   const sql = `DELETE FROM "${database}"."ITT1" WHERE "Father" = ? AND "Code" = ?`;
   await query(sql, [bomParent, itemCode]);
 }
 
-module.exports = { init, connect, checkItemCost, checkBomContribution, checkNestedBom, removeFromBom };
+module.exports = { init, connect, checkItemCost, checkBomContribution, removeFromBom };

@@ -119,14 +119,10 @@ async function run() {
     let bomRows = [];
     if (costInfo.hasCost) {
       try {
+        // L1: direct BOM entries with contribution < R$0.01
+        // L2: item in sub-recipe, sub-recipe in another ficha — effective contribution < R$0.01
+        // Both levels returned in a single query; no separate nested BOM loop needed.
         bomRows = await hana.checkBomContribution(itemCode, whsCode, config.hana.database);
-        for (const bom of bomRows) {
-          try {
-            bom.nestedIn = await hana.checkNestedBom(bom.bomParent, config.hana.database);
-          } catch (e) {
-            bom.nestedIn = [];
-          }
-        }
       } catch (e) {
         console.error(`[hana] checkBomContribution ${itemCode} failed:`, e.message);
       }
