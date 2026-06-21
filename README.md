@@ -88,29 +88,69 @@ Set `"phase": 2` in `config.json` to enable:
 
 ## Azure VM Deployment
 
+> **Tested on Ubuntu 22.04, Node.js 22, PM2 7.0.1**
+
+### 1. OpenVPN split tunnel
+
+Place your `.ovpn`, `.p12`, and `tls.key` files under `/etc/openvpn/client/`. Add these two lines to the `.conf` to avoid routing all traffic through the VPN:
+
+```
+route-nopull
+route 10.123.0.0 255.255.0.0   # only SAP HANA subnet goes through VPN
+```
+
+Create `/etc/openvpn/client/auth.txt` with username on line 1, password on line 2 (mode 600), then reference it with `auth-user-pass /etc/openvpn/client/auth.txt` in the config.
+
 ```bash
-# 1. Install OpenVPN with split tunnel
 apt install openvpn -y
-# Edit .ovpn file:
-#   route-nopull
-#   route 10.0.0.0 255.0.0.0
-systemctl enable openvpn@yourprofile
-systemctl start openvpn@yourprofile
+systemctl enable openvpn-client@yourprofile
+systemctl restart openvpn-client@yourprofile
+ip route show | grep 10.123   # verify route is present
+```
 
-# 2. Install Node.js + PM2
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt install -y nodejs
-npm install -g pm2
+### 2. HANA driver
 
-# 3. Clone and configure
-git clone https://github.com/andreprol/portal-mm-solutions.git
-cd portal-mm-solutions
+Use the `hdb` npm package — easier to install than `@sap/hana-client`:
+
+```bash
+npm install hdb
+```
+
+> **Note:** `hdb` uses `createClient()` not `createConnection()`, and requires `prepare()` + `exec()` for parameterized queries. The `src/hana.js` module handles both drivers automatically.
+
+### 3. Install and start
+
+```bash
+git clone https://github.com/andreprol/portal-mm-solutions.git /opt/portal-mm-solutions
+cd /opt/portal-mm-solutions
 npm install
-cp config.example.json config.json
-# edit config.json
-
-# 4. Start
+cp config.example.json config.json   # fill in your credentials
 pm2 start src/index.js --name portal-mm-solutions
 pm2 save
-pm2 startup
+systemctl enable pm2-root
 ```
+
+### 4. Verify
+
+```bash
+pm2 logs portal-mm-solutions --lines 20 --nostream
+# Expected:
+# [runner] starting check at ...
+# [manyfood] session established
+# [runner] N total errors, M zero-cost
+# [runner] done. case1=N case2alert=N case2action=N
+```
+
+### Local test (no VPN needed)
+
+```bash
+node scripts/test-manyfood.js   # test portal login and error parsing
+node scripts/test-hana.js       # test HANA connectivity (requires VPN)
+```
+
+## Known SAP B1 schema details
+
+| Table | Key column | Notes |
+|-------|-----------|-------|
+| `OITW` | `ItemCode`, `WhsCode` | Average cost per warehouse; `AvgPrice = 0` means no purchase history |
+| `ITT1` | `Father` (parent BOM), `Code` (component) | Component column is **`Code`**, not `ItemCode` |
