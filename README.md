@@ -1,42 +1,144 @@
 # Portal MM Solutions
 
-Automated monitor and auto-fixer for **item without cost** errors in the ManyFood B1 Food portal that block Aloha POS → SAP B1 daily reconciliation.
+Node.js service that monitors the [ManyFood](https://manyfood.manyminds.com.br) portal for **zero-cost item errors** that block the daily Aloha POS → SAP B1 reconciliation at Delírio Tropical restaurants.
 
-## Production status
+Runs 24/7 on Azure VM via PM2. Every 4 hours it checks all monitored stores, classifies each error against SAP HANA, and sends a Portuguese-language email report to the operations team.
 
-> **Phase 1 live since 2026-06-21.** First run detected 40 zero-cost errors across 20 unique items (Cittá store). Alerts delivered via MS Graph email:
-> - `[Portal MM] 4 item(s) without cost — no purchase history`
-> - `[Portal MM] 36 item(s) without cost — negligible BOM contribution`
+## Production Status
 
-Phase 2 (auto-remove from BOM) pending endpoint mapping for reconciliation re-send.
+> **Phase 1 live since 2026-06-21.** Covers 8 stores, 90-day lookback.  
+> Latest run: 176 unique item+store pairs detected → **40 true Case 1** (warehouse-specific check), 0 Case 2.
+
+Phase 2 (auto-remove from BOM + reconciliation resend) pending endpoint mapping.
+
+---
 
 ## The Problem
 
-Every day the ManyFood portal conciliates Aloha POS sales into SAP B1. When an item has no cost in SAP, the entire day's reconciliation fails for every affected store — the day shows RED in the monitoring grid.
+Every day the ManyFood portal conciliates Aloha POS sales into SAP B1. When an item has no cost in SAP, the entire day's reconciliation fails — the day shows **RED** in the monitoring grid for that store.
 
-This app runs 24/7, detects those errors, diagnoses the root cause, and (in Phase 2) fixes them automatically.
+### Case 1 — No Receiving History at This Store
 
-## Two root causes
+`OITW.AvgPrice = 0` at the specific warehouse for the store where the error occurred. The item has never received a purchase invoice (NF de entrada) at that location.
 
-| Case | Cause | Action |
-|------|-------|--------|
-| **Case 1** | Item has no purchase history at that store (no OITW record) | Alert email only |
-| **Case 2** | Item is in a BOM with quantity so small the cost contribution < R$0.01 | Phase 1: alert email · Phase 2: auto-remove from BOM + resend reconciliation |
+**Action:** Alert email — manual review required in SAP B1.
+
+### Case 2 — Negligible BOM Contribution (Ficha Técnica)
+
+The item has cost in OITW, but appears as a component in a Bill of Materials (ITT1) with such a small quantity that `Qty × Price < R$0.01`. SAP treats the parent recipe as having zero cost.
+
+**Phase 1 action:** Alert email listing the affected BOM parent(s) and any nested BOMs.  
+**Phase 2 action (pending):** Auto-remove from ITT1 + trigger reconciliation resend.
+
+---
+
+## Key Design Decisions
+
+### Warehouse-Specific OITW Cost Check
+
+The cost check maps the ManyFood store name to the exact SAP depot (`OITW.WhsCode`) before querying HANA:
+
+```javascript
+function storeToWhsCode(storeName) {
+  // "6 - Cittá Delirio Restaurante" → "06"
+  // "14 - Delirio Tropical Niteroi Plaza" → "14"
+  const match = storeName.match(/^(\d+)\s*-/);
+  return String(parseInt(match[1], 10)).padStart(2, '0');
+}
+```
+
+An item with cost at a _different_ store's warehouse is **not** a Case 1 for this store. Without this check, 136 false positives were generated in initial deployment.
+
+### ITT1 `Price > 0` Filter (Case 2)
+
+The BOM query requires `T0."Price" > 0`:
+
+```sql
+WHERE T0."Code" = ?
+  AND T0."Price" > 0          -- excludes BOMs created before item had any cost
+  AND T0."Quantity" * T0."Price" < 0.01
+```
+
+`ITT1.Price = 0` means the BOM was created when the component had no purchase history — that is a Case 1 issue, not Case 2.
+
+### Per-Store Session Switching
+
+ManyFood scopes reconciliation results to the **active store** in the server session. The service switches context before each store's query:
+
+```
+POST /Principal/requisicaoMudaEmpresa/{filialId}
+```
+
+The response is the full Principal page HTML; `data-filial_on="XXXX"` in that HTML confirms the active store.
+
+### 90-Day Lookback + Grouped Errors
+
+Errors are fetched for the last 90 days, then grouped by `(itemCode, store)`. Each email row shows `firstDate`, `lastDate`, and total `occurrences` instead of one row per day.
+
+### Weekly Dedup
+
+SQLite tracks `(item_code, store, case_type)` with a 7-day rolling window. The same pair will not re-alert for a week, even if it appears on multiple error days within the lookback period.
+
+---
+
+## Monitored Stores
+
+| ManyFood Filial ID | Store Name | SAP WhsCode |
+|--------------------|-----------|-------------|
+| 470 | 6 - Cittá Delirio Restaurante | 06 |
+| 472 | 5 - Delirio Gávea Restaurante | 05 |
+| 473 | 9 - Delirio Metropolitano | 09 |
+| 474 | 8 - Delirio Rio Sul Restaurante | 08 |
+| 476 | 1 - Delirio Tropical S/A. | 01 |
+| 477 | 7 - Delitrop Restaurante | 07 |
+| 478 | 4 - Garcia Trop Restaurante | 04 |
+| 2668 | 14 - Delirio Tropical Niteroi Plaza | 14 |
+
+> **Finding a store's filial ID:** ManyFood IDs are not sequential (e.g. Niterói Plaza = 2668, not in the 470–479 cluster). To find an unknown ID: switch to the store in the portal and read `data-filial_on` from the Principal page HTML. The store selector list is loaded via client-side JS and is not present in the static HTML.
+
+---
 
 ## Architecture
 
 ```
-Azure VM (PM2 24/7)
-│
-├── OpenVPN (split tunnel 10.x.x.0/16) ──► SAP HANA
-│
-└── portal-mm-solutions (Node.js)
-    ├── node-cron          — periodic checks
-    ├── Axios + CookieJar  — ManyFood portal session
-    ├── HANA client        — diagnose Case 1 vs Case 2
-    ├── MS Graph API       — email alerts
-    └── SQLite             — dedup (no repeated alerts same day)
+Azure VM vm-dt-manager (Ubuntu 22.04, Standard_B1ms, brazilsouth)
+├── PM2: portal-mm-solutions  ← this service
+├── PM2: dt-manager           ← Delirio Manager (unrelated)
+└── OpenVPN split tunnel: 10.123.0.0/16 → SAP HANA 10.123.35.82:30015
 ```
+
+### Stack
+
+| Package | Purpose |
+|---------|---------|
+| `node-cron` | Schedule (`0 */4 * * *`) |
+| `axios` + `tough-cookie` + `axios-cookiejar-support` | ManyFood session (CodeIgniter 3 CSRF) |
+| `qs` | Form-encoded POST bodies |
+| `hdb` | SAP HANA driver |
+| `better-sqlite3` | Dedup state |
+| `axios` (MS Graph) | Email via `client_credentials` flow |
+
+---
+
+## Project Structure
+
+```
+src/
+├── index.js        — orchestrator: store loop, grouping, HANA classification, email dispatch
+├── manyfood.js     — portal client: login, store switch, error fetch + parse
+├── hana.js         — HANA queries: OITW cost check, ITT1 BOM + nested BOM, Phase 2 delete
+├── email.js        — MS Graph sender + HTML email templates (Portuguese)
+├── db.js           — SQLite dedup: wasProcessedThisWeek / markProcessed
+└── config.js       — config.json loader
+
+data/
+└── state.db        — SQLite dedup database (gitignored)
+
+config.json         — credentials (gitignored)
+config.example.json — safe template (committed)
+```
+
+---
 
 ## Setup
 
@@ -53,112 +155,116 @@ cp config.example.json config.json
 # Edit config.json with your credentials
 ```
 
-`config.json` fields:
+See `config.example.json` for all fields. Key settings:
 
 | Field | Description |
 |-------|-------------|
 | `schedule` | Cron expression (default: every 4h) |
-| `lookbackDays` | How many past days to check (default: 7) |
-| `manyfood.url` | Portal URL |
-| `manyfood.user` | Portal username |
-| `manyfood.password` | Portal password |
-| `hana.*` | SAP HANA connection |
-| `graph.*` | Microsoft Graph API credentials (for email) |
-| `email.*` | Alert recipient lists |
-| `phase` | `1` = alert only · `2` = auto-fix Case 2 |
+| `lookbackDays` | Days of history to check (default: 90) |
+| `filiais` | Array of `{id, nome}` store objects |
+| `phase` | `1` = alert only · `2` = auto-fix Case 2 (pending) |
 
 ### 3. Run
 
 ```bash
-# Development
-npm run dev
+# Development (single run)
+node src/index.js
 
 # Production (PM2)
 pm2 start src/index.js --name portal-mm-solutions
 pm2 save
 ```
 
-## HANA tables used
+---
 
-| Table | Purpose |
-|-------|---------|
-| `OITW` | Item cost per warehouse — diagnose Case 1 |
-| `ITT1` | BOM components — diagnose and fix Case 2 |
+## HANA Queries Reference
 
-## Phase 2 — Auto-fix
+```sql
+-- Case 1: fetch all warehouse costs (filter by whsCode in JS)
+SELECT T0."ItemCode", T0."WhsCode", T0."AvgPrice", T0."OnHand"
+FROM "DATABASE"."OITW" T0 WHERE T0."ItemCode" = ?
 
-Set `"phase": 2` in `config.json` to enable:
-1. Detects item in BOM with contribution < R$0.01
-2. Removes component from `ITT1` via direct HANA SQL
-3. Sends confirmation email
+-- Case 2: BOM components with negligible cost contribution
+-- Price > 0 is mandatory to avoid false positives
+SELECT T0."Father" AS "bomParent", T0."Code" AS "component",
+       T0."Quantity", T0."Price",
+       T0."Quantity" * T0."Price" AS "contribution"
+FROM "DATABASE"."ITT1" T0
+WHERE T0."Code" = ?
+  AND T0."Price" > 0
+  AND T0."Quantity" * T0."Price" < 0.01
 
-> **Note:** Phase 2 requires VPN access to SAP HANA from the deployment machine.
+-- Nested BOM: is the BOM parent itself a component elsewhere?
+SELECT T0."Father" AS "grandParent", T0."Quantity", T0."Price"
+FROM "DATABASE"."ITT1" T0 WHERE T0."Code" = ?
 
-## Azure VM Deployment
+-- Phase 2: remove component from recipe
+DELETE FROM "DATABASE"."ITT1" WHERE "Father" = ? AND "Code" = ?
+```
 
-> **Tested on Ubuntu 22.04, Node.js 22, PM2 7.0.1**
+### Key SAP B1 Schema Notes
 
-### 1. OpenVPN split tunnel
+| Table | Column | Notes |
+|-------|--------|-------|
+| `OITW` | `WhsCode` | Depot code — must match store number (`"06"` for store 6) |
+| `OITW` | `AvgPrice` | Current moving average cost — `0` means no receiving history at that depot |
+| `ITT1` | `Code` | Component item code — **not** `ItemCode` |
+| `ITT1` | `Father` | Parent BOM/recipe code |
+| `ITT1` | `Price` | Component unit price at BOM creation time — can be `0` if item had no cost then |
 
-Place your `.ovpn`, `.p12`, and `tls.key` files under `/etc/openvpn/client/`. Add these two lines to the `.conf` to avoid routing all traffic through the VPN:
+---
+
+## Azure VM Operations
+
+```bash
+# Deploy new version
+az vm run-command invoke --resource-group rg-dt-manager --name vm-dt-manager \
+  --command-id RunShellScript \
+  --scripts 'cd /opt/portal-mm-solutions && git pull && pm2 restart portal-mm-solutions'
+
+# View logs
+az vm run-command invoke --resource-group rg-dt-manager --name vm-dt-manager \
+  --command-id RunShellScript \
+  --scripts 'pm2 logs portal-mm-solutions --lines 50 --nostream'
+
+# Force immediate run (clears dedup state)
+az vm run-command invoke --resource-group rg-dt-manager --name vm-dt-manager \
+  --command-id RunShellScript \
+  --scripts 'cd /opt/portal-mm-solutions && rm -f data/state.db && pm2 restart portal-mm-solutions'
+```
+
+---
+
+## OpenVPN Split Tunnel Setup (Ubuntu)
+
+Only HANA traffic goes through the VPN — internet (ManyFood, GitHub, Azure) remains direct:
 
 ```
+# In your .conf file:
 route-nopull
-route 10.123.0.0 255.255.0.0   # only SAP HANA subnet goes through VPN
+route 10.123.0.0 255.255.0.0
+auth-user-pass /etc/openvpn/client/auth.txt
 ```
-
-Create `/etc/openvpn/client/auth.txt` with username on line 1, password on line 2 (mode 600), then reference it with `auth-user-pass /etc/openvpn/client/auth.txt` in the config.
 
 ```bash
 apt install openvpn -y
 systemctl enable openvpn-client@yourprofile
 systemctl restart openvpn-client@yourprofile
-ip route show | grep 10.123   # verify route is present
+ip route | grep 10.123   # verify route is active
 ```
 
-### 2. HANA driver
+---
 
-Use the `hdb` npm package — easier to install than `@sap/hana-client`:
+## Roadmap
 
-```bash
-npm install hdb
-```
+### Phase 2 — BOM Auto-Fix
 
-> **Note:** `hdb` uses `createClient()` not `createConnection()`, and requires `prepare()` + `exec()` for parameterized queries. The `src/hana.js` module handles both drivers automatically.
+- [ ] Map the ManyFood "Reenviar Conciliação" endpoint
+- [ ] Implement reconciliation resend trigger after BOM fix
+- [ ] Test `removeFromBom()` against test database (`SBO_DATABASE_TST`) before enabling in production
+- [ ] Set `"phase": 2` in config.json
 
-### 3. Install and start
+### Backlog
 
-```bash
-git clone https://github.com/andreprol/portal-mm-solutions.git /opt/portal-mm-solutions
-cd /opt/portal-mm-solutions
-npm install
-cp config.example.json config.json   # fill in your credentials
-pm2 start src/index.js --name portal-mm-solutions
-pm2 save
-systemctl enable pm2-root
-```
-
-### 4. Verify
-
-```bash
-pm2 logs portal-mm-solutions --lines 20 --nostream
-# Expected:
-# [runner] starting check at ...
-# [manyfood] session established
-# [runner] N total errors, M zero-cost
-# [runner] done. case1=N case2alert=N case2action=N
-```
-
-### Local test (no VPN needed)
-
-```bash
-node scripts/test-manyfood.js   # test portal login and error parsing
-node scripts/test-hana.js       # test HANA connectivity (requires VPN)
-```
-
-## Known SAP B1 schema details
-
-| Table | Key column | Notes |
-|-------|-----------|-------|
-| `OITW` | `ItemCode`, `WhsCode` | Average cost per warehouse; `AvgPrice = 0` means no purchase history |
-| `ITT1` | `Father` (parent BOM), `Code` (component) | Component column is **`Code`**, not `ItemCode` |
+- [ ] Find ManyFood filial ID for Delirio Galeão S/A (Tijuca — closed after fire in early 2025; no recent errors)
+- [ ] Case 3: item has warehouse cost today but ManyFood still flags sem custo — timing/reprocessing issue
