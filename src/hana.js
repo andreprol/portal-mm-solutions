@@ -197,4 +197,65 @@ async function findBomPathsFallback(itemCode, whsCode, database) {
   return await query(sql, [whsCode, itemCode, whsCode, itemCode]);
 }
 
-module.exports = { init, connect, checkItemCost, checkBomContribution, findBomPathsFallback, removeFromBom };
+// Case 3: proactive sweep — find all BOM paths where the item's MIN price across
+// monitored stores yields a contribution < R$0.01.
+// Items range 300001–699999 (ingredients/components). Only items with AvgPrice > 0
+// in at least one monitored store (has receiving history — not a Case 1 issue).
+// Single query — runs once daily, independent of ManyFood errors.
+// whsCodes: array of SAP warehouse codes for the monitored stores (e.g. ['01','04',...])
+async function sweepBomByMinCost(whsCodes, database) {
+  const ph = whsCodes.map(() => '?').join(', ');
+  const sql = `
+    SELECT
+      'L1'                                          AS "level",
+      T0."Code"                                     AS "itemCode",
+      T2."ItemName"                                 AS "itemName",
+      T0."Father"                                   AS "bomParent",
+      NULL                                          AS "via",
+      T0."Quantity"                                 AS "qty1",
+      NULL                                          AS "qty2",
+      MIN(T1."AvgPrice")                            AS "minPrice",
+      T0."Quantity" * MIN(T1."AvgPrice")            AS "contribution"
+    FROM "${database}"."ITT1" T0
+    INNER JOIN "${database}"."OITW" T1
+      ON T1."ItemCode" = T0."Code"
+     AND T1."WhsCode" IN (${ph})
+    INNER JOIN "${database}"."OITM" T2
+      ON T2."ItemCode" = T0."Code"
+    WHERE T0."Code" >= '300001'
+      AND T0."Code" <= '699999'
+      AND T1."AvgPrice" > 0
+    GROUP BY T0."Code", T2."ItemName", T0."Father", T0."Quantity"
+    HAVING T0."Quantity" * MIN(T1."AvgPrice") < 0.01
+
+    UNION ALL
+
+    SELECT
+      'L2'                                               AS "level",
+      T0."Code"                                          AS "itemCode",
+      T2."ItemName"                                      AS "itemName",
+      T3."Father"                                        AS "bomParent",
+      T0."Father"                                        AS "via",
+      T0."Quantity"                                      AS "qty1",
+      T3."Quantity"                                      AS "qty2",
+      MIN(T1."AvgPrice")                                 AS "minPrice",
+      T3."Quantity" * T0."Quantity" * MIN(T1."AvgPrice") AS "contribution"
+    FROM "${database}"."ITT1" T0
+    INNER JOIN "${database}"."OITW" T1
+      ON T1."ItemCode" = T0."Code"
+     AND T1."WhsCode" IN (${ph})
+    INNER JOIN "${database}"."OITM" T2
+      ON T2."ItemCode" = T0."Code"
+    INNER JOIN "${database}"."ITT1" T3
+      ON T3."Code" = T0."Father"
+    WHERE T0."Code" >= '300001'
+      AND T0."Code" <= '699999'
+      AND T1."AvgPrice" > 0
+    GROUP BY T0."Code", T2."ItemName", T0."Father", T0."Quantity", T3."Father", T3."Quantity"
+    HAVING T3."Quantity" * T0."Quantity" * MIN(T1."AvgPrice") < 0.01
+  `;
+  // params: whsCodes twice (once for each SELECT in the UNION ALL)
+  return await query(sql, [...whsCodes, ...whsCodes]);
+}
+
+module.exports = { init, connect, checkItemCost, checkBomContribution, findBomPathsFallback, removeFromBom, sweepBomByMinCost };

@@ -229,10 +229,48 @@ async function run() {
   console.log(`[runner] done. case1=${case1.length} case2alert=${case2Alert.length} case2action=${case2Action.length}`);
 }
 
+// Case 3: proactive daily sweep — find all BOM paths where the item's MIN price
+// across monitored stores yields a contribution < R$0.01, before ManyFood flags it.
+async function runCase3() {
+  console.log('[case3] starting proactive BOM sweep');
+  const whsCodes = config.filiais.map(f => storeToWhsCode(f.nome));
+
+  let rows = [];
+  try {
+    await hana.connect();
+    rows = await hana.sweepBomByMinCost(whsCodes, config.hana.database);
+    console.log(`[case3] sweep complete: ${rows.length} path(s) with contribution < R$0.01`);
+  } catch (e) {
+    console.error('[case3] HANA sweep failed:', e.message);
+    return;
+  }
+
+  if (rows.length === 0) {
+    console.log('[case3] no issues found — no email sent');
+    return;
+  }
+
+  try {
+    const uniqueItems = new Set(rows.map(r => r.itemCode)).size;
+    await email.send(
+      config.email.recipients_case3 || config.email.recipients_case2_alert,
+      `[Portal MM] Caso 3 — ${uniqueItems} produto(s) com risco de custo ínfimo em ficha técnica`,
+      email.buildCase3Email(rows)
+    );
+  } catch (e) {
+    console.error('[case3] email send failed:', e.message);
+  }
+}
+
 run().catch(err => console.error('[runner] unhandled error:', err));
+runCase3().catch(err => console.error('[case3] unhandled error:', err));
 
 cron.schedule(config.schedule, () => {
   run().catch(err => console.error('[runner] unhandled error:', err));
 });
 
-console.log(`[portal-mm-solutions] scheduled: ${config.schedule}`);
+cron.schedule(config.schedule_case3 || '0 6 * * *', () => {
+  runCase3().catch(err => console.error('[case3] unhandled error:', err));
+});
+
+console.log(`[portal-mm-solutions] scheduled: ${config.schedule} | case3: ${config.schedule_case3 || '0 6 * * *'}`);

@@ -32,7 +32,9 @@
   "email": {
     "recipients_case1": ["admin@yourdomain.com"],
     "recipients_case2_alert": ["admin@yourdomain.com"],
-    "recipients_case2_action": ["admin@yourdomain.com"]
+    "recipients_case2_action": ["admin@yourdomain.com"],
+    "recipients_case3": ["admin@yourdomain.com"]
   },
-  "phase": 1
+  "phase": 1,
+  "schedule_case3": "0 6 * * *"
 }
