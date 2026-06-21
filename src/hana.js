@@ -86,27 +86,28 @@ async function checkItemCost(itemCode, whsCode, database) {
   return { hasCost, whsAvgPrice, warehouses: rows };
 }
 
-// Case 2: check whether the item appears in any BOM (ITT1) with a negligible
-// cost contribution (quantity × price < 0.01), which SAP treats as zero cost.
-// In ITT1: "Father" = parent BOM code, "Code" = component item code (not "ItemCode").
-// Price > 0 filter is mandatory: items with no purchase history at BOM creation time
-// have ITT1.Price = 0, causing every BOM they appear in to return contribution = 0.
-// Those belong in Case 1 (no purchase history), not Case 2 (negligible contribution).
-// Returns: [{ bomParent, component, quantity, price, contribution }]
-async function checkBomContribution(itemCode, database) {
+// Case 2: item appears in a BOM (ITT1) with a negligible cost contribution.
+// Contribution = ITT1.Quantity × OITW.AvgPrice (current real cost at the store's depot).
+// ITT1.Price is a frozen value from BOM creation and is NOT used here.
+// whsCode must be the depot for the store where the ManyFood error occurred.
+// Returns: [{ bomParent, component, quantity, currentPrice, contribution }]
+async function checkBomContribution(itemCode, whsCode, database) {
   const sql = `
     SELECT
-      T0."Father"    AS "bomParent",
-      T0."Code"      AS "component",
-      T0."Quantity"  AS "quantity",
-      T0."Price"     AS "price",
-      T0."Quantity" * T0."Price" AS "contribution"
+      T0."Father"                        AS "bomParent",
+      T0."Code"                          AS "component",
+      T0."Quantity"                      AS "quantity",
+      T1."AvgPrice"                      AS "currentPrice",
+      T0."Quantity" * T1."AvgPrice"      AS "contribution"
     FROM "${database}"."ITT1" T0
+    INNER JOIN "${database}"."OITW" T1
+      ON T1."ItemCode" = T0."Code"
+     AND T1."WhsCode" = ?
     WHERE T0."Code" = ?
-      AND T0."Price" > 0
-      AND T0."Quantity" * T0."Price" < 0.01
+      AND T1."AvgPrice" > 0
+      AND T0."Quantity" * T1."AvgPrice" < 0.01
   `;
-  return await query(sql, [itemCode]);
+  return await query(sql, [whsCode, itemCode]);
 }
 
 // Nested BOM check: verifies whether a BOM parent (Father) is itself a component

@@ -119,7 +119,7 @@ async function run() {
     let bomRows = [];
     if (costInfo.hasCost) {
       try {
-        bomRows = await hana.checkBomContribution(itemCode, config.hana.database);
+        bomRows = await hana.checkBomContribution(itemCode, whsCode, config.hana.database);
         for (const bom of bomRows) {
           try {
             bom.nestedIn = await hana.checkNestedBom(bom.bomParent, config.hana.database);
