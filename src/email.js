@@ -233,42 +233,47 @@ function buildCase2ActionEmail(results) {
 }
 
 function buildCase3Email(rows) {
-  // Deduplicate: one row per (level, itemCode, bomParent, via), keep min contribution
-  const fichasMap = new Map();
+  // Group by product: one row per itemCode, listing all affected fichas inline.
+  // Inner dedup: one entry per (level, bomParent, via) per product.
+  const productMap = new Map(); // itemCode → { itemName, minPrice, paths: Map }
+
   for (const r of rows) {
-    const via = r.via || 'null';
-    const key = `${r.level}|${r.itemCode}|${r.bomParent}|${via}`;
     const contrib = Number(r.contribution) || 0;
     const minPrice = Number(r.minPrice) || 0;
-    if (!fichasMap.has(key)) {
-      fichasMap.set(key, { ...r, contribution: contrib, minPrice });
-    } else {
-      const entry = fichasMap.get(key);
-      if (contrib < entry.contribution) {
-        entry.contribution = contrib;
-        entry.minPrice = minPrice;
-      }
+    const via = r.via || null;
+
+    if (!productMap.has(r.itemCode)) {
+      productMap.set(r.itemCode, { itemName: r.itemName || '', minPrice, paths: new Map() });
+    }
+    const prod = productMap.get(r.itemCode);
+    if (minPrice < prod.minPrice) prod.minPrice = minPrice;
+
+    const pathKey = `${r.level}|${r.bomParent}|${via}`;
+    if (!prod.paths.has(pathKey) || contrib < prod.paths.get(pathKey).contribution) {
+      prod.paths.set(pathKey, { level: r.level, bomParent: r.bomParent, via, contribution: contrib });
     }
   }
 
-  const fichaRows = [...fichasMap.values()].map(f => {
-    let acao;
-    if (f.level === 'L1') {
-      acao = `Remover item da ficha <strong>${f.bomParent}</strong>`;
-    } else {
-      acao = `Remover item da sub-receita <strong>${f.via}</strong>`
-           + `<div class="nested">Afeta ficha: ${f.bomParent}</div>`;
-    }
+  const fichaRows = [...productMap.entries()].map(([itemCode, prod]) => {
+    const paths = [...prod.paths.values()].sort((a, b) => a.contribution - b.contribution);
+    const fichasHtml = paths.map(p => {
+      const c = `<span style="font-size:11px;color:#888">R$${p.contribution.toFixed(6)}</span>`;
+      if (p.level === 'L1') {
+        return `<div>Ficha <strong>${p.bomParent}</strong> ${c}</div>`;
+      } else {
+        return `<div>Sub-rec <strong>${p.via}</strong> → ficha ${p.bomParent} ${c}</div>`;
+      }
+    }).join('');
+
     return `<tr>
-      <td>${f.itemCode}</td>
-      <td>${f.itemName || ''}</td>
-      <td style="text-align:right;font-family:monospace">R$${f.minPrice.toFixed(4)}</td>
-      <td style="text-align:right;font-family:monospace">R$${f.contribution.toFixed(6)}</td>
-      <td>${acao}</td>
+      <td>${itemCode}</td>
+      <td>${prod.itemName}</td>
+      <td style="text-align:right;font-family:monospace">R$${prod.minPrice.toFixed(4)}</td>
+      <td>${fichasHtml}</td>
     </tr>`;
   }).join('');
 
-  const uniqueItems = new Set([...fichasMap.values()].map(f => f.itemCode)).size;
+  const uniqueItems = productMap.size;
 
   return `
     <html><head><style>${STYLE}
@@ -283,7 +288,7 @@ function buildCase3Email(rows) {
       <thead>
         <tr>
           <th>Código</th><th>Descrição</th>
-          <th>Menor Preço (lojas)</th><th>Contribuição</th><th>Ação</th>
+          <th>Menor Preço (lojas)</th><th>Fichas a Corrigir</th>
         </tr>
       </thead>
       <tbody>${fichaRows}</tbody>
