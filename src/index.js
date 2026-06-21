@@ -139,6 +139,7 @@ async function run() {
 
   for (const [key, group] of errorMap) {
     const { itemCode, store } = group;
+    const whsCode = storeToWhsCode(store);
     const cached = hanaCache[key];
 
     // HANA query failed for this pair — skip to avoid false positives
