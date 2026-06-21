@@ -96,44 +96,83 @@ function buildCase1Email(errors) {
 }
 
 function buildCase2AlertEmail(errors) {
-  const rows = errors.map(e => {
-    const bomLines = e.bomRows.map(b => {
-      const nested = b.nestedIn && b.nestedIn.length > 0
-        ? `<div class="nested">↳ componente de: ${b.nestedIn.map(n => n.grandParent).join(', ')}</div>`
-        : '';
-      return `<div><strong>${b.bomParent}</strong> (qtd ${b.quantity} × R$${Number(b.price).toFixed(4)} = R$${Number(b.contribution).toFixed(4)})${nested}</div>`;
-    }).join('');
+  // --- Section 1: deduplicated ficha fixes across all stores ---
+  const fichasMap = new Map();
+  for (const e of errors) {
+    for (const b of e.bomRows) {
+      const key = `${e.itemCode}|${b.level}|${b.bomParent}|${b.via || ''}`;
+      if (!fichasMap.has(key)) {
+        fichasMap.set(key, {
+          itemCode:  e.itemCode,
+          itemName:  e.itemName,
+          level:     b.level,
+          bomParent: b.bomParent,
+          via:       b.via || null,
+        });
+      }
+    }
+  }
 
+  const fichaRows = [...fichasMap.values()].map(f => {
+    const acao = f.level === 'L2'
+      ? `Remover sub-receita <strong>${f.via}</strong> da ficha <strong>${f.bomParent}</strong>`
+      : `Remover item da ficha <strong>${f.bomParent}</strong>`;
     return `<tr>
-      <td>${e.itemCode}</td>
-      <td>${e.itemName}</td>
-      <td>${e.store}</td>
-      <td>${e.firstDate}</td>
-      <td>${e.lastDate}</td>
-      <td style="text-align:center">${e.occurrences}</td>
-      <td>${bomLines}</td>
+      <td>${f.itemCode}</td>
+      <td>${f.itemName}</td>
+      <td>${acao}</td>
+    </tr>`;
+  }).join('');
+
+  // --- Section 2: stores × dates to reprocess ---
+  const storesDates = new Map();
+  for (const e of errors) {
+    if (!storesDates.has(e.store)) storesDates.set(e.store, new Set());
+    for (const d of (e.errorDates || [e.firstDate])) storesDates.get(e.store).add(d);
+  }
+
+  const storeRows = [...storesDates.entries()].map(([store, dates]) => {
+    const sorted = [...dates].sort((a, b) => portalDateToIso(a).localeCompare(portalDateToIso(b)));
+    return `<tr>
+      <td>${store}</td>
+      <td>${sorted.join(' · ')}</td>
     </tr>`;
   }).join('');
 
   return `
     <html><head><style>${STYLE}</style></head><body>
-    <h2>Portal MM Solutions — Item Sem Custo (Caso 2: Contribuição Ínfima em Ficha Técnica)</h2>
-    <p>Os itens abaixo aparecem em fichas técnicas (ITT1) com contribuição de custo
-    <strong>inferior a R$0,01</strong>. O SAP interpreta isso como "sem custo" e bloqueia a conciliação do dia.</p>
+    <h2>Portal MM Solutions — Caso 2: Contribuição Ínfima em Ficha Técnica</h2>
+
+    <h3 style="color:#2c3e50;margin-top:20px">1. Correções nas Fichas Técnicas (SAP B1)</h3>
+    <p>Remova os itens indicados das fichas técnicas abaixo para eliminar a contribuição de custo &lt; R$0,01:</p>
     <table>
       <thead>
-        <tr><th>Código</th><th>Descrição</th><th>Loja</th><th>Primeira Ocorrência</th><th>Última Ocorrência</th><th>Dias c/ Erro</th><th>Ficha(s) Técnica(s)</th></tr>
+        <tr><th>Código</th><th>Descrição</th><th>Ação</th></tr>
       </thead>
-      <tbody>${rows}</tbody>
+      <tbody>${fichaRows}</tbody>
     </table>
+
+    <h3 style="color:#2c3e50;margin-top:28px">2. Dias/Lojas para Reprocessar no ManyFood</h3>
+    <p>Após corrigir as fichas, reprocesse os dias abaixo (botão <em>Reenviar Conciliação</em>):</p>
+    <table>
+      <thead>
+        <tr><th>Loja</th><th>Datas com erro</th></tr>
+      </thead>
+      <tbody>${storeRows}</tbody>
+    </table>
+
     <div class="note">
       ℹ️ <strong>Fase 1 — somente alerta.</strong> Nenhuma ação automática foi realizada.
-      O item precisa ser <strong>removido da ficha técnica</strong> indicada no SAP B1
-      para liberar a conciliação. Ative a <em>fase 2</em> no config para habilitar remoção automática.
+      Ative a <em>fase 2</em> no config para habilitar remoção automática.
     </div>
     <p class="footer">Detectado em ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} (horário de Brasília)</p>
     </body></html>
   `;
+}
+
+function portalDateToIso(s) {
+  const [d, m, y] = (s || '').split('/');
+  return y ? `${y}-${m}-${d}` : s;
 }
 
 function buildCase2ActionEmail(results) {

@@ -81,12 +81,13 @@ async function run() {
     for (const err of zeroCost) {
       const key = `${err.itemCode}|${err.store}`;
       if (!errorMap.has(key)) {
-        errorMap.set(key, { ...err, firstDate: err.date, lastDate: err.date, occurrences: 1 });
+        errorMap.set(key, { ...err, firstDate: err.date, lastDate: err.date, occurrences: 1, errorDates: new Set([err.date]) });
       } else {
         const g = errorMap.get(key);
         g.firstDate   = minDate(g.firstDate, err.date);
         g.lastDate    = maxDate(g.lastDate, err.date);
         g.occurrences += 1;
+        g.errorDates.add(err.date);
       }
     }
   }
