@@ -146,16 +146,9 @@ async function run() {
     if (cached === null) continue;
 
     const { costInfo, bomRows } = cached;
-    // Case 1 uses weekly dedup — "no receiving history" is a slow-moving issue.
-    // Case 2 does NOT dedup — report every cycle while the error exists in ManyFood.
-    const dedup1 = db.wasProcessedThisWeek(itemCode, store, 1);
-
     if (!costInfo.hasCost) {
       // Case 1 — OITW.AvgPrice = 0 at the store's warehouse → no receiving history at this location
-      if (!dedup1) {
-        case1.push(group);
-        db.markProcessed(itemCode, store, 1, 'alert');
-      }
+      case1.push(group);
     } else if (bomRows.length > 0) {
       // Case 2 — has cost but BOM contribution < R$0.01 → ficha técnica issue
       if (config.phase >= 2) {
