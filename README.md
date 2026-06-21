@@ -2,6 +2,14 @@
 
 Automated monitor and auto-fixer for **item without cost** errors in the ManyFood B1 Food portal that block Aloha POS → SAP B1 daily reconciliation.
 
+## Production status
+
+> **Phase 1 live since 2026-06-21.** First run detected 40 zero-cost errors across 20 unique items (Cittá store). Alerts delivered via MS Graph email:
+> - `[Portal MM] 4 item(s) without cost — no purchase history`
+> - `[Portal MM] 36 item(s) without cost — negligible BOM contribution`
+
+Phase 2 (auto-remove from BOM) pending endpoint mapping for reconciliation re-send.
+
 ## The Problem
 
 Every day the ManyFood portal conciliates Aloha POS sales into SAP B1. When an item has no cost in SAP, the entire day's reconciliation fails for every affected store — the day shows RED in the monitoring grid.
