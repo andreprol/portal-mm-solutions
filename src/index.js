@@ -8,14 +8,14 @@ const db = require('./db');
 hana.init(config.hana);
 email.init(config.graph, config.graph.fromEmail);
 
-// Returns date string 'YYYY-MM-DD' offset by N days from today
+// Returns a 'YYYY-MM-DD' date string offset by N days from today
 function dateOffset(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
 }
 
-// Convert portal date 'DD/MM/YYYY' → 'YYYY-MM-DD'
+// Converts portal date format 'DD/MM/YYYY' to ISO 'YYYY-MM-DD'
 function portalDateToIso(s) {
   const [d, m, y] = s.split('/');
   return `${y}-${m}-${d}`;
@@ -42,11 +42,11 @@ async function run() {
     return;
   }
 
-  const semCusto = manyfood.parseSemCustoErrors(rawErrors);
-  console.log(`[runner] ${rawErrors.length} total errors, ${semCusto.length} "sem custo"`);
+  const zeroCostErrors = manyfood.parseZeroCostErrors(rawErrors);
+  console.log(`[runner] ${rawErrors.length} total errors, ${zeroCostErrors.length} zero-cost`);
 
-  if (semCusto.length === 0) {
-    console.log('[runner] no "sem custo" errors. Done.');
+  if (zeroCostErrors.length === 0) {
+    console.log('[runner] no zero-cost item errors found. Done.');
     return;
   }
 
@@ -54,10 +54,10 @@ async function run() {
   const case2Alert = [];
   const case2Action = [];
 
-  for (const err of semCusto) {
+  for (const err of zeroCostErrors) {
     const isoDate = portalDateToIso(err.date);
-    const dedup1 = db.wasProcessedToday(err.itemCode, err.filial, isoDate, 1);
-    const dedup2 = db.wasProcessedToday(err.itemCode, err.filial, isoDate, 2);
+    const dedup1 = db.wasProcessedToday(err.itemCode, err.store, isoDate, 1);
+    const dedup2 = db.wasProcessedToday(err.itemCode, err.store, isoDate, 2);
 
     let costInfo;
     try {
@@ -68,13 +68,13 @@ async function run() {
     }
 
     if (!costInfo.hasCost) {
-      // Caso 1 — no purchase history at all
+      // Case 1 — item has no purchase history at this store, no OITW record
       if (!dedup1) {
         case1.push(err);
-        db.markProcessed(err.itemCode, err.filial, isoDate, 1, 'alert');
+        db.markProcessed(err.itemCode, err.store, isoDate, 1, 'alert');
       }
     } else {
-      // Has cost globally — check if it's in a BOM with negligible contribution
+      // Item has cost globally — check if it appears in a BOM with negligible contribution
       let bomRows;
       try {
         bomRows = await hana.checkBomContribution(err.itemCode, config.hana.database);
@@ -84,41 +84,38 @@ async function run() {
       }
 
       if (bomRows.length > 0) {
-        // Caso 2
+        // Case 2 — negligible BOM contribution causes SAP to treat item as zero-cost
         if (config.phase >= 2) {
           if (!dedup2) {
-            // Auto-remove from BOM + mark for resend
             const results = [];
             for (const bom of bomRows) {
               try {
-                await hana.removeFromBom(err.itemCode, bom.fichaTecnica, config.hana.database);
-                results.push({ ...err, fichaTecnica: bom.fichaTecnica, success: true });
+                await hana.removeFromBom(err.itemCode, bom.bomParent, config.hana.database);
+                results.push({ ...err, bomParent: bom.bomParent, success: true });
               } catch (e) {
-                results.push({ ...err, fichaTecnica: bom.fichaTecnica, success: false, error: e.message });
+                results.push({ ...err, bomParent: bom.bomParent, success: false, error: e.message });
               }
             }
             case2Action.push(...results);
-            db.markProcessed(err.itemCode, err.filial, isoDate, 2, 'auto-removed');
+            db.markProcessed(err.itemCode, err.store, isoDate, 2, 'auto-removed');
           }
         } else {
-          // Phase 1 — alert only
+          // Phase 1 — alert only, manual removal required
           if (!dedup2) {
             case2Alert.push({ ...err, bomRows });
-            db.markProcessed(err.itemCode, err.filial, isoDate, 2, 'alerted');
+            db.markProcessed(err.itemCode, err.store, isoDate, 2, 'alerted');
           }
         }
       } else {
-        // BOM contribution check passed (>= 0.01) but still "sem custo"
-        // Treat as Case 1 (unknown cause)
+        // BOM contribution passes the threshold but item still shows zero-cost — unknown cause
         if (!dedup1) {
           case1.push(err);
-          db.markProcessed(err.itemCode, err.filial, isoDate, 1, 'alert-unknown');
+          db.markProcessed(err.itemCode, err.store, isoDate, 1, 'alert-unknown');
         }
       }
     }
   }
 
-  // Send emails
   if (case1.length > 0) {
     try {
       await email.send(
@@ -158,7 +155,7 @@ async function run() {
   console.log(`[runner] done. case1=${case1.length} case2alert=${case2Alert.length} case2action=${case2Action.length}`);
 }
 
-// Run immediately on start, then on schedule
+// Run immediately on startup, then repeat on the configured cron schedule
 run().catch(err => console.error('[runner] unhandled error:', err));
 
 cron.schedule(config.schedule, () => {

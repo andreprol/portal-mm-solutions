@@ -56,7 +56,7 @@ function buildCase1Email(errors) {
     `<tr>
       <td>${e.itemCode}</td>
       <td>${e.itemName}</td>
-      <td>${e.filial}</td>
+      <td>${e.store}</td>
       <td>${e.date}</td>
     </tr>`
   ).join('');
@@ -80,9 +80,9 @@ function buildCase2AlertEmail(errors) {
     `<tr>
       <td>${e.itemCode}</td>
       <td>${e.itemName}</td>
-      <td>${e.filial}</td>
+      <td>${e.store}</td>
       <td>${e.date}</td>
-      <td>${e.bomRows.map(b => `${b.fichaTecnica} (qty ${b.quantity} × R$${b.price} = R$${b.contribution})`).join('<br>')}</td>
+      <td>${e.bomRows.map(b => `${b.bomParent} (qty ${b.quantity} × R$${b.price} = R$${b.contribution})`).join('<br>')}</td>
     </tr>`
   ).join('');
 
@@ -106,7 +106,7 @@ function buildCase2ActionEmail(results) {
     `<tr>
       <td>${r.itemCode}</td>
       <td>${r.itemName}</td>
-      <td>${r.fichaTecnica}</td>
+      <td>${r.bomParent}</td>
       <td>${r.success ? '✅ Removed' : '❌ Failed: ' + r.error}</td>
     </tr>`
   ).join('');

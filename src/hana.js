@@ -41,7 +41,7 @@ async function query(sql, params = []) {
   return new Promise((resolve, reject) => {
     conn.exec(sql, params, (err, rows) => {
       if (err) {
-        conn = null; // force reconnect next time
+        conn = null; // force reconnect on next call
         reject(err);
       } else {
         resolve(rows);
@@ -50,8 +50,8 @@ async function query(sql, params = []) {
   });
 }
 
-// Caso 1: check if item has any cost (AvgPrice > 0) in any warehouse for that store
-// Returns: { hasCost: bool, avgPrice: number, warehouses: [...] }
+// Case 1: check whether the item has any cost (AvgPrice > 0) in any warehouse.
+// Returns: { hasCost: bool, warehouses: [...] }
 async function checkItemCost(itemCode, database) {
   const sql = `
     SELECT T0."ItemCode", T0."WhsCode", T0."AvgPrice", T0."OnHand"
@@ -61,18 +61,16 @@ async function checkItemCost(itemCode, database) {
   const rows = await query(sql, [itemCode]);
 
   const hasCost = rows.some(r => (r.AvgPrice || r['AvgPrice'] || 0) > 0);
-  return {
-    hasCost,
-    warehouses: rows,
-  };
+  return { hasCost, warehouses: rows };
 }
 
-// Caso 2: check if item is a BOM component with negligible cost contribution (< 0.01)
-// Returns: [{ fichaTecnica, quantity, price, contribution }]
+// Case 2: check whether the item appears in any BOM (ITT1) with a negligible
+// cost contribution (quantity × price < 0.01), which SAP treats as zero cost.
+// Returns: [{ bomParent, component, quantity, price, contribution }]
 async function checkBomContribution(itemCode, database) {
   const sql = `
     SELECT
-      T0."Father"    AS "fichaTecnica",
+      T0."Father"    AS "bomParent",
       T0."ItemCode"  AS "component",
       T0."Quantity"  AS "quantity",
       T0."Price"     AS "price",
@@ -84,13 +82,13 @@ async function checkBomContribution(itemCode, database) {
   return await query(sql, [itemCode]);
 }
 
-// Phase 2: remove item from BOM (ITT1) — used only when phase >= 2
-async function removeFromBom(itemCode, fichaTecnica, database) {
+// Phase 2: remove the item from a BOM (ITT1 row) by parent + component.
+async function removeFromBom(itemCode, bomParent, database) {
   const sql = `
     DELETE FROM "${database}"."ITT1"
     WHERE "Father" = ? AND "ItemCode" = ?
   `;
-  await query(sql, [fichaTecnica, itemCode]);
+  await query(sql, [bomParent, itemCode]);
 }
 
 module.exports = { init, connect, checkItemCost, checkBomContribution, removeFromBom };

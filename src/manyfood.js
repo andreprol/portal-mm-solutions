@@ -32,7 +32,7 @@ async function getCsrfToken() {
 async function login(user, password) {
   if (!client) buildClient();
 
-  // Load login page to get CSRF cookie
+  // Load login page to receive the CodeIgniter CSRF cookie
   await client.get('/Login');
   const csrfToken = await getCsrfToken();
 
@@ -45,7 +45,7 @@ async function login(user, password) {
     maxRedirects: 5,
   });
 
-  // Verify login succeeded by checking we're not back on login page
+  // Verify login succeeded — must not be redirected back to login form
   const isLoggedIn = !resp.request.path.includes('/Login') &&
     !String(resp.data).includes('id="usuario"');
 
@@ -62,7 +62,7 @@ async function post(path, params) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   });
 
-  // If redirected to login page, session expired — re-throw
+  // Session expired if response redirects back to login form
   if (String(resp.data).includes('id="usuario"')) {
     throw new Error('ManyFood session expired');
   }
@@ -71,7 +71,7 @@ async function post(path, params) {
   return data;
 }
 
-// Returns errors for a date range
+// Returns all errors for a date range from the portal.
 // dateStart / dateEnd format: 'YYYY-MM-DD'
 async function getErrorsForPeriod(dateStart, dateEnd) {
   const data = await post('/Conciliacao/getErrosNoPeriodoAjax', {
@@ -86,36 +86,39 @@ async function getErrorsForPeriod(dateStart, dateEnd) {
   return data.erros || [];
 }
 
-// Filters only "item sem custo" errors and extracts structured info
-// Returns: [{ itemCode, itemName, filial, date }]
-function parseSemCustoErrors(erros) {
+// Filters only "zero cost" errors from the portal error list and returns structured objects.
+// The portal error message is in Portuguese: "O item 'CODE':'NAME' está sem custo"
+// Returns: [{ itemCode, itemName, store, date, managingCompany }]
+function parseZeroCostErrors(errors) {
+  // Matches the Portuguese error string emitted by the portal
   const PATTERN = /O item '(\d+)':'([^']+)' está sem custo/;
   const results = [];
 
-  for (const e of erros) {
+  for (const e of errors) {
     const match = (e.erro || '').match(PATTERN);
     if (!match) continue;
 
     results.push({
       itemCode: match[1],
       itemName: match[2],
-      filial: e.filiais || '',
-      date: e.data || '',           // format: DD/MM/YYYY
-      empresaGestora: e.empresaGestora || '',
+      store: e.filiais || '',
+      date: e.data || '',             // format: DD/MM/YYYY
+      managingCompany: e.empresaGestora || '',
     });
   }
 
   return results;
 }
 
-// Sends "Reenviar Conciliação" for a specific day and filial
-// date format: 'YYYY-MM-DD', filialId: numeric string from portal
-async function reenviarConciliacao(date, filialId) {
+// Fetches the day detail from the monitoring grid.
+// Used in Phase 2 to trigger reconciliation resend after a BOM fix.
+// date format: 'YYYY-MM-DD', storeId: numeric string from portal
+async function getDayDetail(date, storeId) {
   const data = await post('/Conciliacao/getInformacoesDiaMonitoramento', {
     dataMonitoramento: date,
-    idFilialMonitoramento: filialId,
+    idFilialMonitoramento: storeId,
   });
   return data;
 }
 
-module.exports = { login, getErrorsForPeriod, parseSemCustoErrors, reenviarConciliacao };
+module.exports = { login, getErrorsForPeriod, parseZeroCostErrors, getDayDetail };

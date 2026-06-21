@@ -11,31 +11,31 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS processed_errors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     item_code TEXT NOT NULL,
-    filial TEXT NOT NULL,
+    store TEXT NOT NULL,
     date TEXT NOT NULL,
     case_type INTEGER NOT NULL,
     action TEXT NOT NULL,
     processed_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE UNIQUE INDEX IF NOT EXISTS ux_error_day
-    ON processed_errors(item_code, filial, date, case_type);
+    ON processed_errors(item_code, store, date, case_type);
 `);
 
-function wasProcessedToday(itemCode, filial, date, caseType) {
+function wasProcessedToday(itemCode, store, date, caseType) {
   const today = new Date().toISOString().slice(0, 10);
   const row = db.prepare(
     `SELECT id FROM processed_errors
-     WHERE item_code = ? AND filial = ? AND date = ? AND case_type = ?
+     WHERE item_code = ? AND store = ? AND date = ? AND case_type = ?
        AND processed_at >= ?`
-  ).get(itemCode, filial, date, caseType, today + ' 00:00:00');
+  ).get(itemCode, store, date, caseType, today + ' 00:00:00');
   return !!row;
 }
 
-function markProcessed(itemCode, filial, date, caseType, action) {
+function markProcessed(itemCode, store, date, caseType, action) {
   db.prepare(
-    `INSERT OR IGNORE INTO processed_errors(item_code, filial, date, case_type, action)
+    `INSERT OR IGNORE INTO processed_errors(item_code, store, date, case_type, action)
      VALUES(?, ?, ?, ?, ?)`
-  ).run(itemCode, filial, date, caseType, action);
+  ).run(itemCode, store, date, caseType, action);
 }
 
 module.exports = { wasProcessedToday, markProcessed };
