@@ -25,9 +25,22 @@ Every day the ManyFood portal conciliates Aloha POS sales into SAP B1. When an i
 
 ### Case 2 — Negligible BOM Contribution (Ficha Técnica)
 
-The item has cost in OITW, but appears as a component in a Bill of Materials (ITT1) with such a small quantity that `Qty × Price < R$0.01`. SAP treats the parent recipe as having zero cost.
+The item has cost in OITW at the store's depot, but when its effective contribution to a recipe is calculated it falls below R$0.01 — SAP treats the cost as zero.
 
-**Phase 1 action:** Alert email listing the affected BOM parent(s) and any nested BOMs.  
+**Cost formula:** `ITT1.Quantity × OITW.AvgPrice` (current moving-average cost, **not** ITT1.Price which is a frozen value from BOM creation time).
+
+Two levels are checked (Delírio Tropical BOMs are at most 2 levels deep):
+
+| Level | Formula | Meaning |
+|-------|---------|---------|
+| L1 — direct | `Qty_item × OITW.AvgPrice < R$0.01` | Item is directly in a ficha with negligible qty |
+| L2 — nested | `Qty_subRecipe_in_parent × Qty_item_in_subRecipe × OITW.AvgPrice < R$0.01` | Item is in a sub-recipe (250xxx) that is itself used in another ficha with a small qty, making the effective contribution negligible |
+
+**L2 example:** sub-recipe B contains Alho (0.01 kg, R$20/kg → R$0.20 OK). But ficha A uses B with qty 0.02 → effective contribution = 0.02 × 0.01 × R$20 = **R$0.004 < R$0.01 → Case 2**.
+
+**Important — moving average:** `OITW.AvgPrice` can temporarily drop if a purchase arrives at an unusually low price, causing a momentary "sem custo" that would not be visible with today's price. Use the SAP stock verification report to check historical cost fluctuations around the error date.
+
+**Phase 1 action:** Alert email listing affected fichas técnicas (L1 and L2) with the effective contribution.  
 **Phase 2 action (pending):** Auto-remove from ITT1 + trigger reconciliation resend.
 
 ---
@@ -49,17 +62,41 @@ function storeToWhsCode(storeName) {
 
 An item with cost at a _different_ store's warehouse is **not** a Case 1 for this store. Without this check, 136 false positives were generated in initial deployment.
 
-### ITT1 `Price > 0` Filter (Case 2)
+### Case 2: OITW.AvgPrice, not ITT1.Price
 
-The BOM query requires `T0."Price" > 0`:
+`ITT1.Price` is a **frozen snapshot** of the component cost at BOM creation time — it is irrelevant for cost calculation. The actual contribution used by SAP (and by this service) is:
 
-```sql
-WHERE T0."Code" = ?
-  AND T0."Price" > 0          -- excludes BOMs created before item had any cost
-  AND T0."Quantity" * T0."Price" < 0.01
+```
+contribution = ITT1.Quantity × OITW.AvgPrice(store depot)
 ```
 
-`ITT1.Price = 0` means the BOM was created when the component had no purchase history — that is a Case 1 issue, not Case 2.
+`OITW.AvgPrice` is the **current moving average** cost at the specific warehouse. It can temporarily fall if a purchase arrives at an unusually low price, causing a momentary Case 2 error even though today's price looks fine.
+
+### 2-Level BOM Check (UNION ALL)
+
+Delírio Tropical has at most 2 BOM levels. Both are checked in a single SQL query:
+
+```sql
+-- L1: item directly in a ficha with negligible contribution
+SELECT 'L1', T0."Father" AS bomParent, NULL AS via,
+       T0."Quantity" * T1."AvgPrice" AS contribution
+FROM ITT1 T0
+INNER JOIN OITW T1 ON T1."ItemCode"=T0."Code" AND T1."WhsCode"=?
+WHERE T0."Code"=? AND T1."AvgPrice">0 AND T0."Quantity"*T1."AvgPrice" < 0.01
+
+UNION ALL
+
+-- L2: item in sub-recipe (via), sub-recipe in ficha — effective contribution < 0.01
+SELECT 'L2', T2."Father" AS bomParent, T0."Father" AS via,
+       T2."Quantity" * T0."Quantity" * T1."AvgPrice" AS contribution
+FROM ITT1 T0
+INNER JOIN OITW T1 ON T1."ItemCode"=T0."Code" AND T1."WhsCode"=?
+INNER JOIN ITT1 T2 ON T2."Code"=T0."Father"
+WHERE T0."Code"=? AND T1."AvgPrice">0
+  AND T2."Quantity"*T0."Quantity"*T1."AvgPrice" < 0.01
+```
+
+Result fields: `level` (L1/L2), `bomParent` (ficha to fix), `via` (intermediate sub-recipe, L2 only), `qty1`, `qty2`, `currentPrice`, `contribution`.
 
 ### Per-Store Session Switching
 
@@ -184,21 +221,14 @@ pm2 save
 SELECT T0."ItemCode", T0."WhsCode", T0."AvgPrice", T0."OnHand"
 FROM "DATABASE"."OITW" T0 WHERE T0."ItemCode" = ?
 
--- Case 2: BOM components with negligible cost contribution
--- Price > 0 is mandatory to avoid false positives
-SELECT T0."Father" AS "bomParent", T0."Code" AS "component",
-       T0."Quantity", T0."Price",
-       T0."Quantity" * T0."Price" AS "contribution"
-FROM "DATABASE"."ITT1" T0
-WHERE T0."Code" = ?
-  AND T0."Price" > 0
-  AND T0."Quantity" * T0."Price" < 0.01
+-- Case 2 L1: item directly in ficha with Qty × OITW.AvgPrice < R$0.01
+-- Case 2 L2: item in sub-recipe (250xxx), sub-recipe in ficha — effective contrib < R$0.01
+-- See "2-Level BOM Check" section above for full query
 
--- Nested BOM: is the BOM parent itself a component elsewhere?
-SELECT T0."Father" AS "grandParent", T0."Quantity", T0."Price"
-FROM "DATABASE"."ITT1" T0 WHERE T0."Code" = ?
+-- Phase 2 L1: remove item from direct ficha técnica
+DELETE FROM "DATABASE"."ITT1" WHERE "Father" = ? AND "Code" = ?
 
--- Phase 2: remove component from recipe
+-- Phase 2 L2: remove sub-recipe (via) from grandparent ficha
 DELETE FROM "DATABASE"."ITT1" WHERE "Father" = ? AND "Code" = ?
 ```
 
