@@ -84,17 +84,18 @@ async function checkItemCost(itemCode, database) {
 
 // Case 2: check whether the item appears in any BOM (ITT1) with a negligible
 // cost contribution (quantity × price < 0.01), which SAP treats as zero cost.
+// In ITT1: "Father" = parent BOM code, "Code" = component item code (not "ItemCode").
 // Returns: [{ bomParent, component, quantity, price, contribution }]
 async function checkBomContribution(itemCode, database) {
   const sql = `
     SELECT
       T0."Father"    AS "bomParent",
-      T0."ItemCode"  AS "component",
+      T0."Code"      AS "component",
       T0."Quantity"  AS "quantity",
       T0."Price"     AS "price",
       T0."Quantity" * T0."Price" AS "contribution"
     FROM "${database}"."ITT1" T0
-    WHERE T0."ItemCode" = ?
+    WHERE T0."Code" = ?
       AND T0."Quantity" * T0."Price" < 0.01
   `;
   return await query(sql, [itemCode]);
@@ -102,10 +103,7 @@ async function checkBomContribution(itemCode, database) {
 
 // Phase 2: remove the item from a BOM (ITT1 row) by parent + component.
 async function removeFromBom(itemCode, bomParent, database) {
-  const sql = `
-    DELETE FROM "${database}"."ITT1"
-    WHERE "Father" = ? AND "ItemCode" = ?
-  `;
+  const sql = `DELETE FROM "${database}"."ITT1" WHERE "Father" = ? AND "Code" = ?`;
   await query(sql, [bomParent, itemCode]);
 }
 
