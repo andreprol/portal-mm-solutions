@@ -36,7 +36,7 @@ async function login(user, password) {
   await client.get('/Login');
   const csrfToken = await getCsrfToken();
 
-  const resp = await client.post('/Login/check', qs.stringify({
+  const resp = await client.post('/Login/requisicaoLogin', qs.stringify({
     ci_csrf_token: csrfToken,
     usuario: user,
     senha: password,
