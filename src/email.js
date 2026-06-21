@@ -302,4 +302,41 @@ function buildCase3Email(rows) {
   `;
 }
 
-module.exports = { init, send, buildCase1Email, buildCase2AlertEmail, buildCase2ActionEmail, buildCase3Email };
+function buildCase3ActionEmail(results) {
+  const removed = results.filter(r => r.success).length;
+  const failed  = results.length - removed;
+
+  const rows = results.map(r => {
+    const where = r.level === 'L1'
+      ? `Ficha <strong>${r.bomParent}</strong>`
+      : `Sub-receita <strong>${r.via}</strong> → ficha ${r.bomParent}`;
+    const status = r.success
+      ? '✅ Removido'
+      : `❌ Falha: ${r.error}`;
+    return `<tr>
+      <td>${r.itemCode}</td>
+      <td>${r.itemName}</td>
+      <td>${where}</td>
+      <td>${status}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+    <html><head><style>${STYLE}
+      h2 { color: #1a6a9a; border-bottom: 2px solid #1a6a9a; }
+    </style></head><body>
+    <h2>Portal MM Solutions — Remoção Automática (Caso 3)</h2>
+    <p><strong>${removed}</strong> entrada(s) removida(s) com sucesso.
+    ${failed > 0 ? `<strong style="color:#c0392b">${failed} falha(s)</strong>.` : ''}</p>
+    <table>
+      <thead>
+        <tr><th>Código</th><th>Descrição</th><th>Removido de</th><th>Resultado</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="footer">Executado em ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} (horário de Brasília)</p>
+    </body></html>
+  `;
+}
+
+module.exports = { init, send, buildCase1Email, buildCase2AlertEmail, buildCase2ActionEmail, buildCase3Email, buildCase3ActionEmail };

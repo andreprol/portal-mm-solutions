@@ -250,15 +250,55 @@ async function runCase3() {
     return;
   }
 
-  try {
-    const uniqueItems = new Set(rows.map(r => r.itemCode)).size;
-    await email.send(
-      config.email.recipients_case3 || config.email.recipients_case2_alert,
-      `[Portal MM] Caso 3 — ${uniqueItems} produto(s) com risco de custo ínfimo em ficha técnica`,
-      email.buildCase3Email(rows)
-    );
-  } catch (e) {
-    console.error('[case3] email send failed:', e.message);
+  if (config.phase >= 2) {
+    // Phase 2: auto-remove each unique (itemCode, father) pair from ITT1.
+    // L1: father = bomParent | L2: father = via (sub-recipe where the item lives directly)
+    const pathsMap = new Map();
+    for (const r of rows) {
+      const father = r.via || r.bomParent;
+      const key = `${r.itemCode}|${father}`;
+      if (!pathsMap.has(key)) {
+        pathsMap.set(key, { itemCode: r.itemCode, itemName: r.itemName || '', father, bomParent: r.bomParent, level: r.level, via: r.via || null });
+      }
+    }
+
+    const results = [];
+    for (const p of pathsMap.values()) {
+      try {
+        await hana.removeFromBom(p.itemCode, p.father, config.hana.database);
+        console.log(`[case3] removed ${p.itemCode} from ${p.father}`);
+        results.push({ ...p, success: true });
+      } catch (e) {
+        console.error(`[case3] failed to remove ${p.itemCode} from ${p.father}:`, e.message);
+        results.push({ ...p, success: false, error: e.message });
+      }
+    }
+
+    const removed = results.filter(r => r.success).length;
+    const failed  = results.length - removed;
+    console.log(`[case3] phase2 done: ${removed} removed, ${failed} failed`);
+
+    try {
+      await email.send(
+        config.email.recipients_case3 || config.email.recipients_case2_alert,
+        `[Portal MM] Caso 3 — ${removed} entrada(s) removida(s) de ficha técnica${failed > 0 ? ` (${failed} falha(s))` : ''}`,
+        email.buildCase3ActionEmail(results)
+      );
+    } catch (e) {
+      console.error('[case3] email send failed:', e.message);
+    }
+  } else {
+    // Phase 1: alert only
+    try {
+      const uniqueItems = new Set(rows.map(r => r.itemCode)).size;
+      await email.send(
+        config.email.recipients_case3 || config.email.recipients_case2_alert,
+        `[Portal MM] Caso 3 — ${uniqueItems} produto(s) com risco de custo ínfimo em ficha técnica`,
+        email.buildCase3Email(rows)
+      );
+    } catch (e) {
+      console.error('[case3] email send failed:', e.message);
+    }
   }
 }
 
