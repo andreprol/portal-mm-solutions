@@ -6,10 +6,9 @@ Runs 24/7 on Azure VM via PM2. Every 4 hours it checks all monitored stores, cla
 
 ## Production Status
 
-> **Phase 1 live since 2026-06-21.** Covers 8 stores, 90-day lookback.  
-> Latest run: 176 unique item+store pairs detected → **40 true Case 1** (warehouse-specific check), 0 Case 2.
-
-Phase 2 (auto-remove from BOM + reconciliation resend) pending endpoint mapping.
+> **Phase 1 live since 2026-06-21. Case 1 ✅ and Case 2 ✅ validated.**  
+> Covers 8 stores, 90-day lookback, no dedup on Case 2 (reports every cycle while error persists).  
+> Case 3 pending definition. Phase 2 (auto-remove from BOM) pending endpoint mapping.
 
 ---
 
@@ -17,31 +16,63 @@ Phase 2 (auto-remove from BOM + reconciliation resend) pending endpoint mapping.
 
 Every day the ManyFood portal conciliates Aloha POS sales into SAP B1. When an item has no cost in SAP, the entire day's reconciliation fails — the day shows **RED** in the monitoring grid for that store.
 
-### Case 1 — No Receiving History at This Store
+---
+
+## Case 1 — No Receiving History at This Store
 
 `OITW.AvgPrice = 0` at the specific warehouse for the store where the error occurred. The item has never received a purchase invoice (NF de entrada) at that location.
 
-**Action:** Alert email — manual review required in SAP B1.
+**Action:** Alert email — manual review required in SAP B1.  
+**Dedup:** 7-day rolling window (slow-moving issue — NF de entrada takes time).
 
-### Case 2 — Negligible BOM Contribution (Ficha Técnica)
+---
 
-The item has cost in OITW at the store's depot, but when its effective contribution to a recipe is calculated it falls below R$0.01 — SAP treats the cost as zero.
+## Case 2 — Negligible BOM Contribution (Ficha Técnica)
 
-**Cost formula:** `ITT1.Quantity × OITW.AvgPrice` (current moving-average cost, **not** ITT1.Price which is a frozen value from BOM creation time).
+The item has cost in OITW at the store's depot, but its effective contribution to a recipe falls below R$0.01 — SAP treats the cost as zero.
 
-Two levels are checked (Delírio Tropical BOMs are at most 2 levels deep):
+**Action:** Alert email listing fichas to fix (Section 1) + dates to reprocess in ManyFood (Section 2).  
+**Dedup:** None — reports every cycle while the error exists in ManyFood.
 
-| Level | Formula | Meaning |
-|-------|---------|---------|
-| L1 — direct | `Qty_item × OITW.AvgPrice < R$0.01` | Item is directly in a ficha with negligible qty |
-| L2 — nested | `Qty_subRecipe_in_parent × Qty_item_in_subRecipe × OITW.AvgPrice < R$0.01` | Item is in a sub-recipe (250xxx) that is itself used in another ficha with a small qty, making the effective contribution negligible |
+### Cost Formula (validated manually against SAP B1 — 2026-06-21)
 
-**L2 example:** sub-recipe B contains Alho (0.01 kg, R$20/kg → R$0.20 OK). But ficha A uses B with qty 0.02 → effective contribution = 0.02 × 0.01 × R$20 = **R$0.004 < R$0.01 → Case 2**.
+> **Do NOT use `ITT1.Price`** — it is a frozen value from BOM creation time and is irrelevant.  
+> **Use `ITT1.Quantity × OITW.AvgPrice`** — current moving-average cost at the store's depot.
 
-**Important — moving average:** `OITW.AvgPrice` can temporarily drop if a purchase arrives at an unusually low price, causing a momentary "sem custo" that would not be visible with today's price. Use the SAP stock verification report to check historical cost fluctuations around the error date.
+| Level | Formula | Threshold |
+|-------|---------|-----------|
+| L1 — direct | `Qty_item × OITW.AvgPrice` | < R$0.01 |
+| L2 — nested via sub-recipe | `Qty_subRecipe_in_parent × Qty_item_in_subRecipe × OITW.AvgPrice` | < R$0.01 |
 
-**Phase 1 action:** Alert email listing affected fichas técnicas (L1 and L2) with the effective contribution.  
-**Phase 2 action (pending):** Auto-remove from ITT1 + trigger reconciliation resend.
+**L2 example:** sub-recipe B contains Alho (0.01 kg × R$20 = R$0.20 — OK standalone). But ficha A uses B with qty 0.02 → effective contribution = 0.02 × 0.01 × R$20 = **R$0.004 < R$0.01 → Case 2**.
+
+Delírio Tropical BOMs are **at most 2 levels deep** (confirmed).
+
+### Fallback — Historical Price Dip
+
+When the strict check returns 0 (today's price recovered, but the error occurred on a past date):
+
+- ManyFood reprocesses using the **historical SAP cost** → the same error would recur without fixing the ficha
+- `findBomPathsFallback` queries all BOM paths without the `< R$0.01` filter, sorted by contribution ASC
+- Reports the **single lowest-contribution path** (the "next lowest" candidate) — no threshold filter
+- Email shows orange note: *"contrib. atual R$X.XXXX — custo variou"*
+- **Iterative:** if fixing that path doesn't resolve the error, the next cycle will surface the next candidate
+
+### HANA Note — Computed Columns Return as Strings
+
+Expressions like `T0."Quantity" * T1."AvgPrice"` in SELECT return **string**, not number. Always use `Number()` before comparisons or `.toFixed()`.
+
+### Email Format (Case 2)
+
+**Section 1 — Ficha Técnica Fixes (deduplicated across stores):**
+- L1: *"Remover item da ficha X"*
+- L2: *"Remover item da sub-receita X (Afeta fichas: Y1, Y2...)"* — remove the **item** from the sub-recipe, not the sub-recipe from the parent
+- Fallback items: same action + orange *(contrib. atual R$X.XXXX — custo variou)* note
+
+**Section 2 — Dates to Reprocess in ManyFood:**  
+Table of store × error dates → click "Reenviar Conciliação" for each after fixing fichas.
+
+**Subject:** `[Portal MM] N produto(s) sem custo` — N = unique product codes (not item+store pairs).
 
 ---
 
@@ -60,24 +91,16 @@ function storeToWhsCode(storeName) {
 }
 ```
 
-An item with cost at a _different_ store's warehouse is **not** a Case 1 for this store. Without this check, 136 false positives were generated in initial deployment.
+Checking any warehouse (not store-specific) produced 136 false positives in initial deployment.
 
-### Case 2: OITW.AvgPrice, not ITT1.Price
+### No Dedup on Case 2
 
-`ITT1.Price` is a **frozen snapshot** of the component cost at BOM creation time — it is irrelevant for cost calculation. The actual contribution used by SAP (and by this service) is:
-
-```
-contribution = ITT1.Quantity × OITW.AvgPrice(store depot)
-```
-
-`OITW.AvgPrice` is the **current moving average** cost at the specific warehouse. It can temporarily fall if a purchase arrives at an unusually low price, causing a momentary Case 2 error even though today's price looks fine.
+Case 2 errors require a manual ficha fix. A 7-day dedup would suppress the alert even when the problem is unfixed. Case 2 reports on every cycle until the error disappears from ManyFood logs.
 
 ### 2-Level BOM Check (UNION ALL)
 
-Delírio Tropical has at most 2 BOM levels. Both are checked in a single SQL query:
-
 ```sql
--- L1: item directly in a ficha with negligible contribution
+-- L1: item directly in a ficha with Qty × OITW.AvgPrice < R$0.01
 SELECT 'L1', T0."Father" AS bomParent, NULL AS via,
        T0."Quantity" * T1."AvgPrice" AS contribution
 FROM ITT1 T0
@@ -96,26 +119,6 @@ WHERE T0."Code"=? AND T1."AvgPrice">0
   AND T2."Quantity"*T0."Quantity"*T1."AvgPrice" < 0.01
 ```
 
-Result fields: `level` (L1/L2), `bomParent` (ficha to fix), `via` (intermediate sub-recipe, L2 only), `qty1`, `qty2`, `currentPrice`, `contribution`.
-
-### Per-Store Session Switching
-
-ManyFood scopes reconciliation results to the **active store** in the server session. The service switches context before each store's query:
-
-```
-POST /Principal/requisicaoMudaEmpresa/{filialId}
-```
-
-The response is the full Principal page HTML; `data-filial_on="XXXX"` in that HTML confirms the active store.
-
-### 90-Day Lookback + Grouped Errors
-
-Errors are fetched for the last 90 days, then grouped by `(itemCode, store)`. Each email row shows `firstDate`, `lastDate`, and total `occurrences` instead of one row per day.
-
-### Weekly Dedup
-
-SQLite tracks `(item_code, store, case_type)` with a 7-day rolling window. The same pair will not re-alert for a week, even if it appears on multiple error days within the lookback period.
-
 ---
 
 ## Monitored Stores
@@ -131,7 +134,7 @@ SQLite tracks `(item_code, store, case_type)` with a 7-day rolling window. The s
 | 478 | 4 - Garcia Trop Restaurante | 04 |
 | 2668 | 14 - Delirio Tropical Niteroi Plaza | 14 |
 
-> **Finding a store's filial ID:** ManyFood IDs are not sequential (e.g. Niterói Plaza = 2668, not in the 470–479 cluster). To find an unknown ID: switch to the store in the portal and read `data-filial_on` from the Principal page HTML. The store selector list is loaded via client-side JS and is not present in the static HTML.
+> **Finding a store's filial ID:** Switch to the store in the portal and read `data-filial_on` from the Principal page HTML. The store selector is loaded via client-side JS and is not present in static HTML.
 
 ---
 
@@ -150,9 +153,8 @@ Azure VM vm-dt-manager (Ubuntu 22.04, Standard_B1ms, brazilsouth)
 |---------|---------|
 | `node-cron` | Schedule (`0 */4 * * *`) |
 | `axios` + `tough-cookie` + `axios-cookiejar-support` | ManyFood session (CodeIgniter 3 CSRF) |
-| `qs` | Form-encoded POST bodies |
 | `hdb` | SAP HANA driver |
-| `better-sqlite3` | Dedup state |
+| `better-sqlite3` | Dedup state (Case 1 only — 7-day window) |
 | `axios` (MS Graph) | Email via `client_credentials` flow |
 
 ---
@@ -163,9 +165,9 @@ Azure VM vm-dt-manager (Ubuntu 22.04, Standard_B1ms, brazilsouth)
 src/
 ├── index.js        — orchestrator: store loop, grouping, HANA classification, email dispatch
 ├── manyfood.js     — portal client: login, store switch, error fetch + parse
-├── hana.js         — HANA queries: OITW cost check, ITT1 BOM + nested BOM, Phase 2 delete
+├── hana.js         — HANA queries: OITW cost check, ITT1 BOM (strict + fallback), Phase 2 delete
 ├── email.js        — MS Graph sender + HTML email templates (Portuguese)
-├── db.js           — SQLite dedup: wasProcessedThisWeek / markProcessed
+├── db.js           — SQLite dedup: wasProcessedThisWeek / markProcessed (Case 1 only)
 └── config.js       — config.json loader
 
 data/
@@ -192,25 +194,15 @@ cp config.example.json config.json
 # Edit config.json with your credentials
 ```
 
-See `config.example.json` for all fields. Key settings:
-
-| Field | Description |
-|-------|-------------|
-| `schedule` | Cron expression (default: every 4h) |
-| `lookbackDays` | Days of history to check (default: 90) |
-| `filiais` | Array of `{id, nome}` store objects |
-| `phase` | `1` = alert only · `2` = auto-fix Case 2 (pending) |
-
 ### 3. Run
 
 ```bash
-# Development (single run)
-node src/index.js
-
 # Production (PM2)
 pm2 start src/index.js --name portal-mm-solutions
 pm2 save
 ```
+
+> ⚠️ Never run `node src/index.js` via `az vm run-command` — it blocks for 10+ minutes. Always use `pm2 restart`.
 
 ---
 
@@ -221,14 +213,12 @@ pm2 save
 SELECT T0."ItemCode", T0."WhsCode", T0."AvgPrice", T0."OnHand"
 FROM "DATABASE"."OITW" T0 WHERE T0."ItemCode" = ?
 
--- Case 2 L1: item directly in ficha with Qty × OITW.AvgPrice < R$0.01
--- Case 2 L2: item in sub-recipe (250xxx), sub-recipe in ficha — effective contrib < R$0.01
--- See "2-Level BOM Check" section above for full query
+-- Case 2 L1 + L2: see "2-Level BOM Check" section above
 
--- Phase 2 L1: remove item from direct ficha técnica
-DELETE FROM "DATABASE"."ITT1" WHERE "Father" = ? AND "Code" = ?
+-- Fallback (no threshold — all BOM paths sorted ASC by contribution)
+-- Same UNION ALL query but without the < 0.01 WHERE clause
 
--- Phase 2 L2: remove sub-recipe (via) from grandparent ficha
+-- Phase 2: remove item from ficha (L1) or sub-recipe from parent (L2)
 DELETE FROM "DATABASE"."ITT1" WHERE "Father" = ? AND "Code" = ?
 ```
 
@@ -240,61 +230,44 @@ DELETE FROM "DATABASE"."ITT1" WHERE "Father" = ? AND "Code" = ?
 | `OITW` | `AvgPrice` | Current moving average cost — `0` means no receiving history at that depot |
 | `ITT1` | `Code` | Component item code — **not** `ItemCode` |
 | `ITT1` | `Father` | Parent BOM/recipe code |
-| `ITT1` | `Price` | Component unit price at BOM creation time — can be `0` if item had no cost then |
+| `ITT1` | `Price` | Component unit price at BOM creation time — **do not use** |
 
 ---
 
 ## Azure VM Operations
 
 ```bash
-# Deploy new version
+# Deploy + force immediate cycle
 az vm run-command invoke --resource-group rg-dt-manager --name vm-dt-manager \
   --command-id RunShellScript \
-  --scripts 'cd /opt/portal-mm-solutions && git pull && pm2 restart portal-mm-solutions'
+  --scripts 'cd /opt/portal-mm-solutions && git pull && rm -f data/state.db && pm2 restart portal-mm-solutions && echo PRONTO'
 
 # View logs
 az vm run-command invoke --resource-group rg-dt-manager --name vm-dt-manager \
   --command-id RunShellScript \
   --scripts 'pm2 logs portal-mm-solutions --lines 50 --nostream'
 
-# Force immediate run (clears dedup state)
+# Search logs for a specific item
 az vm run-command invoke --resource-group rg-dt-manager --name vm-dt-manager \
   --command-id RunShellScript \
-  --scripts 'cd /opt/portal-mm-solutions && rm -f data/state.db && pm2 restart portal-mm-solutions'
-```
+  --scripts 'pm2 logs portal-mm-solutions --lines 500 --nostream 2>/dev/null | grep 500302'
 
----
-
-## OpenVPN Split Tunnel Setup (Ubuntu)
-
-Only HANA traffic goes through the VPN — internet (ManyFood, GitHub, Azure) remains direct:
-
-```
-# In your .conf file:
-route-nopull
-route 10.123.0.0 255.255.0.0
-auth-user-pass /etc/openvpn/client/auth.txt
-```
-
-```bash
-apt install openvpn -y
-systemctl enable openvpn-client@yourprofile
-systemctl restart openvpn-client@yourprofile
-ip route | grep 10.123   # verify route is active
+# VM restart (clears stuck run-command lock — takes ~2 min, PM2 auto-restarts)
+az vm restart --resource-group rg-dt-manager --name vm-dt-manager
 ```
 
 ---
 
 ## Roadmap
 
-### Phase 2 — BOM Auto-Fix
+### Case 3 (to be defined)
+- Scenario where the error persists in ManyFood but does not fit Case 1 or Case 2
+- To be specified with André in the next session
 
-- [ ] Map the ManyFood "Reenviar Conciliação" endpoint
-- [ ] Implement reconciliation resend trigger after BOM fix
-- [ ] Test `removeFromBom()` against test database (`SBO_DATABASE_TST`) before enabling in production
+### Phase 2 — BOM Auto-Fix
+- [ ] Map the ManyFood "Reenviar Conciliação" endpoint (capture via DevTools)
+- [ ] Implement `removeFromBom()` against test database (`SBO_DATABASE_TST`) before enabling in production
 - [ ] Set `"phase": 2` in config.json
 
 ### Backlog
-
-- [ ] Find ManyFood filial ID for Delirio Galeão S/A (Tijuca — closed after fire in early 2025; no recent errors)
-- [ ] Case 3: item has warehouse cost today but ManyFood still flags sem custo — timing/reprocessing issue
+- [ ] Find ManyFood filial ID for Delirio Galeão S/A (Tijuca — closed after fire in early 2025)
