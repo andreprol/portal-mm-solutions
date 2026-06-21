@@ -186,8 +186,9 @@ async function run() {
       let fallbackRows = [];
       try {
         const allPaths = await hana.findBomPathsFallback(itemCode, whsCode, config.hana.database);
-        // Keep paths with contribution < R$1.00 — these could fail if price dips 100x
-        fallbackRows = allPaths.filter(r => (r.contribution || 0) < 1.00);
+        // Take only the single lowest-contribution path (closest to R$0.01).
+        // If it doesn't fix the error, the next run will pick the next candidate.
+        fallbackRows = allPaths.length > 0 ? [allPaths[0]] : [];
         if (fallbackRows.length > 0) {
           console.log(`[hana] fallback found ${fallbackRows.length} path(s) for ${itemCode}@${whsCode} (contributions: ${fallbackRows.map(r => r.contribution?.toFixed(4)).join(', ')})`);
         }
