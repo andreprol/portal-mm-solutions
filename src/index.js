@@ -186,9 +186,11 @@ async function run() {
       let fallbackRows = [];
       try {
         const allPaths = await hana.findBomPathsFallback(itemCode, whsCode, config.hana.database);
-        // Take only the single lowest-contribution path (closest to R$0.01).
-        // If it doesn't fix the error, the next run will pick the next candidate.
-        fallbackRows = allPaths.length > 0 ? [allPaths[0]] : [];
+        // Take the single lowest-contribution path, but only if it's plausibly
+        // close to R$0.01 (within 5x, i.e. < R$0.05). A higher minimum means
+        // the error has a different root cause and we cannot pinpoint the ficha.
+        const best = allPaths[0];
+        fallbackRows = (best && (best.contribution || 0) < 0.05) ? [best] : [];
         if (fallbackRows.length > 0) {
           console.log(`[hana] fallback found ${fallbackRows.length} path(s) for ${itemCode}@${whsCode} (contributions: ${fallbackRows.map(r => r.contribution?.toFixed(4)).join(', ')})`);
         }
