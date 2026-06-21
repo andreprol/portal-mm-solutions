@@ -151,4 +151,50 @@ async function removeFromBom(itemCode, bomParent, database) {
   await query(sql, [bomParent, itemCode]);
 }
 
-module.exports = { init, connect, checkItemCost, checkBomContribution, removeFromBom };
+// Fallback for Case 2 when checkBomContribution returns 0 rows.
+// The ManyFood log is authoritative — if the error exists and the item has OITW cost,
+// there IS a ficha that caused it (possibly at a lower historical AvgPrice).
+// This query removes the < 0.01 threshold and returns ALL BOM paths sorted by
+// contribution ascending, so the user can identify and fix the likely culprit(s).
+async function findBomPathsFallback(itemCode, whsCode, database) {
+  const sql = `
+    SELECT
+      'L1'                               AS "level",
+      T0."Father"                        AS "bomParent",
+      NULL                               AS "via",
+      T0."Quantity"                      AS "qty1",
+      NULL                               AS "qty2",
+      T1."AvgPrice"                      AS "currentPrice",
+      T0."Quantity" * T1."AvgPrice"      AS "contribution"
+    FROM "${database}"."ITT1" T0
+    INNER JOIN "${database}"."OITW" T1
+      ON T1."ItemCode" = T0."Code"
+     AND T1."WhsCode" = ?
+    WHERE T0."Code" = ?
+      AND T1."AvgPrice" > 0
+
+    UNION ALL
+
+    SELECT
+      'L2'                                          AS "level",
+      T2."Father"                                   AS "bomParent",
+      T0."Father"                                   AS "via",
+      T0."Quantity"                                 AS "qty1",
+      T2."Quantity"                                 AS "qty2",
+      T1."AvgPrice"                                 AS "currentPrice",
+      T2."Quantity" * T0."Quantity" * T1."AvgPrice" AS "contribution"
+    FROM "${database}"."ITT1" T0
+    INNER JOIN "${database}"."OITW" T1
+      ON T1."ItemCode" = T0."Code"
+     AND T1."WhsCode" = ?
+    INNER JOIN "${database}"."ITT1" T2
+      ON T2."Code" = T0."Father"
+    WHERE T0."Code" = ?
+      AND T1."AvgPrice" > 0
+
+    ORDER BY "contribution" ASC
+  `;
+  return await query(sql, [whsCode, itemCode, whsCode, itemCode]);
+}
+
+module.exports = { init, connect, checkItemCost, checkBomContribution, findBomPathsFallback, removeFromBom };

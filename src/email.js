@@ -108,6 +108,7 @@ function buildCase2AlertEmail(errors) {
           fichasMap.set(key, {
             level: 'L1', itemCode: e.itemCode, itemName: e.itemName,
             target: b.bomParent, affectedFichas: null,
+            contribution: b.contribution,
           });
         }
       } else {
@@ -117,9 +118,15 @@ function buildCase2AlertEmail(errors) {
           fichasMap.set(key, {
             level: 'L2', itemCode: e.itemCode, itemName: e.itemName,
             target: b.via, affectedFichas: new Set([b.bomParent]),
+            contribution: b.contribution,
           });
         } else {
-          fichasMap.get(key).affectedFichas.add(b.bomParent);
+          const entry = fichasMap.get(key);
+          entry.affectedFichas.add(b.bomParent);
+          // Keep the minimum contribution (worst-case path)
+          if ((b.contribution || 0) < (entry.contribution || Infinity)) {
+            entry.contribution = b.contribution;
+          }
         }
       }
     }
@@ -127,11 +134,16 @@ function buildCase2AlertEmail(errors) {
 
   const fichaRows = [...fichasMap.values()].map(f => {
     let acao;
+    // Show current contribution only when it's >= 0.01 (fallback/momentary case)
+    // so the user knows the price recovered but the ficha still needs fixing
+    const contrib = f.contribution >= 0.01
+      ? ` <span style="font-size:11px;color:#e67e22">(contrib. atual R$${Number(f.contribution).toFixed(4)} — custo variou)</span>`
+      : '';
     if (f.level === 'L1') {
-      acao = `Remover item da ficha <strong>${f.target}</strong>`;
+      acao = `Remover item da ficha <strong>${f.target}</strong>${contrib}`;
     } else {
       const fichas = [...f.affectedFichas].sort().join(', ');
-      acao = `Remover item da sub-receita <strong>${f.target}</strong>`
+      acao = `Remover item da sub-receita <strong>${f.target}</strong>${contrib}`
            + `<div class="nested">Afeta fichas: ${fichas}</div>`;
     }
     return `<tr>
@@ -161,16 +173,15 @@ function buildCase2AlertEmail(errors) {
     <h2>Portal MM Solutions — Caso 2: Contribuição Ínfima em Ficha Técnica</h2>
 
     <h3 style="color:#2c3e50;margin-top:20px">1. Correções nas Fichas Técnicas (SAP B1)</h3>
-    <p>Remova os itens indicados das fichas técnicas abaixo para eliminar a contribuição de custo &lt; R$0,01:</p>
+    <p>Remova os itens indicados das fichas técnicas abaixo. Itens marcados com <em>custo variou</em>
+    foram detectados via preço histórico — remova da ficha para garantir o reprocessamento.</p>
     <table>
-      <thead>
-        <tr><th>Código</th><th>Descrição</th><th>Ação</th></tr>
-      </thead>
+      <thead><tr><th>Código</th><th>Descrição</th><th>Ação</th></tr></thead>
       <tbody>${fichaRows}</tbody>
     </table>
 
     <h3 style="color:#2c3e50;margin-top:28px">2. Dias/Lojas para Reprocessar no ManyFood</h3>
-    <p>Após corrigir as fichas, reprocesse os dias abaixo (botão <em>Reenviar Conciliação</em>):</p>
+    <p>Após corrigir as fichas acima, reprocesse os dias abaixo (botão <em>Reenviar Conciliação</em>):</p>
     <table>
       <thead>
         <tr><th>Loja</th><th>Datas com erro</th></tr>

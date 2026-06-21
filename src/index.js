@@ -176,9 +176,29 @@ async function run() {
           db.markProcessed(itemCode, store, 2, 'alerted');
         }
       }
+    } else {
+      // hasCost=true but strict check (Qty × AvgPrice < R$0.01) returned 0 rows.
+      // The ManyFood log is authoritative: the error exists and there IS a ficha that caused it.
+      // Most likely cause: OITW.AvgPrice was lower on the error date (moving average dipped).
+      // When ManyFood reprocesses that date it will use the historical cost → same error recurs.
+      // Solution: find the lowest-contribution BOM paths (most likely culprits) and report them.
+      let fallbackRows = [];
+      try {
+        const allPaths = await hana.findBomPathsFallback(itemCode, whsCode, config.hana.database);
+        // Keep paths with contribution < R$1.00 — these could fail if price dips 100x
+        fallbackRows = allPaths.filter(r => (r.contribution || 0) < 1.00);
+        if (fallbackRows.length > 0) {
+          console.log(`[hana] fallback found ${fallbackRows.length} path(s) for ${itemCode}@${whsCode} (contributions: ${fallbackRows.map(r => r.contribution?.toFixed(4)).join(', ')})`);
+        }
+      } catch (e) {
+        console.error(`[hana] findBomPathsFallback ${itemCode} failed:`, e.message);
+      }
+
+      if (!dedup2) {
+        case2Alert.push({ ...group, bomRows: fallbackRows });
+        db.markProcessed(itemCode, store, 2, fallbackRows.length > 0 ? 'momentary' : 'no-bom-found');
+      }
     }
-    // else: has cost at this warehouse AND no BOM issue → ManyFood error is historical/timing,
-    // item will self-resolve once the reconciliation date is reprocessed. No alert needed.
   }
 
   // --- Step 4: send emails ---
