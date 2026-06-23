@@ -202,3 +202,55 @@ az vm restart --resource-group rg-dt-manager --name vm-dt-manager
 
 ### Backlog
 - [ ] Find ManyFood filial ID for Delirio Galeão S/A (Tijuca — closed after fire in early 2025)
+
+---
+
+## Incident Log
+
+### 2026-06-22/23 — PM2 Down + DNS Broken
+
+**Root cause:** Disk-full incident (22/06) caused `systemd-resolved` to fail → `/etc/resolv.conf` symlink pointed to empty file → DNS silently broken → MS Graph (email) and ManyFood (DNS) stopped working → PM2 entered restart loop and eventually died.
+
+**Symptoms:**
+- Case 3 removed 16 BOM entries but confirmation email was never sent
+- `pm2 list` was empty — both `portal-mm-solutions` and `dt-manager` offline
+- VPN route to `10.123.0.0/16` was gone
+
+**Fixes applied:**
+1. VPN reconnected + `openvpn-client@deliriotropical` enabled in systemd (survives reboots)
+2. PM2 restarted for both processes + `pm2 save` + `pm2 startup systemd`
+3. Port 3847 zombie (leftover dt-manager) killed via `fuser -k 3847/tcp`
+4. `/etc/resolv.conf` permanently fixed:
+   ```bash
+   rm /etc/resolv.conf   # break the broken symlink
+   echo "nameserver 168.63.129.16
+   nameserver 8.8.8.8
+   nameserver 8.8.4.4" > /etc/resolv.conf
+   chattr +i /etc/resolv.conf   # immutable — nothing can overwrite it
+   ```
+5. Retroactive audit email sent for the 16 silent removals via `audit-resend.js`
+
+**Verify DNS health:**
+```bash
+lsattr /etc/resolv.conf   # must show 'i' flag
+nslookup login.microsoftonline.com
+```
+
+**PM2 recovery procedure (if pm2 list is empty):**
+```bash
+fuser -k 3847/tcp 2>/dev/null   # clear port if dt-manager has a zombie
+cd /opt/portal-mm-solutions && pm2 start src/index.js --name portal-mm-solutions
+cd /opt/dt-manager && pm2 start ecosystem.config.js
+pm2 save
+```
+
+---
+
+## Changelog
+
+| Date | Change |
+|------|--------|
+| 2026-06-23 | `buildCase3ActionEmail` now shows **Custo na Ficha** column (exact contribution, 6 decimal places); `pathsMap` in `index.js` now preserves `minPrice`, `qty1`, `qty2`, `contribution` from HANA sweep |
+| 2026-06-23 | VM DNS fixed: `/etc/resolv.conf` made immutable (`chattr +i`) with Azure DNS + Google fallback |
+| 2026-06-21 | Case 3 Phase 2 activated — auto-remove enabled (`phase=2` in config.json) |
+| 2026-06-21 | Cases 1, 2, 3 deployed and validated in production |
