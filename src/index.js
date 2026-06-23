@@ -258,7 +258,7 @@ async function runCase3() {
       const father = r.via || r.bomParent;
       const key = `${r.itemCode}|${father}`;
       if (!pathsMap.has(key)) {
-        pathsMap.set(key, { itemCode: r.itemCode, itemName: r.itemName || '', father, bomParent: r.bomParent, level: r.level, via: r.via || null });
+        pathsMap.set(key, { itemCode: r.itemCode, itemName: r.itemName || '', father, bomParent: r.bomParent, level: r.level, via: r.via || null, minPrice: Number(r.minPrice) || 0, qty1: Number(r.qty1) || 0, qty2: r.qty2 != null ? Number(r.qty2) : null, contribution: Number(r.contribution) || 0 });
       }
     }
 

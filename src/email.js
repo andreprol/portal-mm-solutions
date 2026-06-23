@@ -313,10 +313,14 @@ function buildCase3ActionEmail(results) {
     const status = r.success
       ? '✅ Removido'
       : `❌ Falha: ${r.error}`;
+    const contrib = r.contribution != null
+      ? `R$ ${Number(r.contribution).toFixed(6)}`
+      : '—';
     return `<tr>
       <td>${r.itemCode}</td>
       <td>${r.itemName}</td>
       <td>${where}</td>
+      <td style="text-align:right;font-family:monospace">${contrib}</td>
       <td>${status}</td>
     </tr>`;
   }).join('');
@@ -330,7 +334,7 @@ function buildCase3ActionEmail(results) {
     ${failed > 0 ? `<strong style="color:#c0392b">${failed} falha(s)</strong>.` : ''}</p>
     <table>
       <thead>
-        <tr><th>Código</th><th>Descrição</th><th>Removido de</th><th>Resultado</th></tr>
+        <tr><th>Código</th><th>Descrição</th><th>Removido de</th><th>Custo na Ficha</th><th>Resultado</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
