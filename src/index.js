@@ -246,7 +246,16 @@ async function runCase3() {
   }
 
   if (rows.length === 0) {
-    console.log('[case3] no issues found — no email sent');
+    console.log('[case3] no issues found — sending all-clear email');
+    try {
+      await email.send(
+        config.email.recipients_case3 || config.email.recipients_case2_alert,
+        `[Portal MM] Caso 3 — Nenhuma ficha técnica com risco de custo ínfimo`,
+        email.buildCase3AllClearEmail()
+      );
+    } catch (e) {
+      console.error('[case3] all-clear email send failed:', e.message);
+    }
     return;
   }
 

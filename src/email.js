@@ -343,4 +343,20 @@ function buildCase3ActionEmail(results) {
   `;
 }
 
-module.exports = { init, send, buildCase1Email, buildCase2AlertEmail, buildCase2ActionEmail, buildCase3Email, buildCase3ActionEmail };
+function buildCase3AllClearEmail() {
+  return `
+    <html><head><style>${STYLE}
+      h2 { color: #27ae60; border-bottom: 2px solid #27ae60; }
+      .ok { background: #eafaf1; border-left: 4px solid #27ae60; padding: 12px 16px; border-radius: 4px; margin: 16px 0; }
+    </style></head><body>
+    <h2>Portal MM Solutions — Caso 3 ✅ Tudo limpo</h2>
+    <div class="ok">
+      Nenhuma ficha técnica com risco de custo ínfimo encontrada na varredura de hoje.<br>
+      Todas as estruturas de BOM estão dentro do limite mínimo de R$&nbsp;0,01.
+    </div>
+    <p class="footer">Executado em ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} (horário de Brasília)</p>
+    </body></html>
+  `;
+}
+
+module.exports = { init, send, buildCase1Email, buildCase2AlertEmail, buildCase2ActionEmail, buildCase3Email, buildCase3ActionEmail, buildCase3AllClearEmail };
