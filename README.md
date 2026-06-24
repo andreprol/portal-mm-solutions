@@ -66,7 +66,8 @@ When the strict check returns 0 (today's price recovered), reports the single lo
 Scans all BOM structures before ManyFood flags an error. Finds items whose minimum price across monitored stores would cause a contribution < R$0.01, then **removes them automatically**.
 
 **Schedule:** Once daily at 06:00 (`0 6 * * *`, configurable via `schedule_case3`).  
-**Subject:** `[Portal MM] Caso 3 — N entrada(s) removida(s) de ficha técnica`
+**Subject (removals):** `[Portal MM] Caso 3 — N entrada(s) removida(s) de ficha técnica`  
+**Subject (all-clear):** `[Portal MM] Caso 3 — Nenhuma ficha técnica com risco de custo ínfimo`
 
 ### Logic
 
@@ -87,7 +88,8 @@ Result email (`buildCase3ActionEmail`) shows ✅ / ❌ per removed entry.
 
 ### Email Format (Case 3 — Phase 2)
 
-One row per removal attempt: Item Code | Description | Removed From | Result (✅/❌)
+- **Removals found:** one row per removal attempt — Item Code | Description | Removed From | Result (✅/❌)
+- **Nothing found:** all-clear email (green) — `buildCase3AllClearEmail` — confirms all BOM structures are within the R$0.01 threshold
 
 ---
 
