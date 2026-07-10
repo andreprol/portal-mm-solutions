@@ -41,6 +41,16 @@ async function connect() {
       conn.connect(err => err ? reject(err) : resolve());
     }
   });
+
+  // hdb emits async 'error' events on TCP drop (VPN flapping).
+  // Without a listener, Node throws uncaughtException and crashes.
+  // Setting conn = null lets the lazy-connect in query() reconnect on next call.
+  if (conn) {
+    conn.on('error', (err) => {
+      console.error('[hana] connection error (async):', err.message);
+      conn = null;
+    });
+  }
 }
 
 async function query(sql, params = []) {

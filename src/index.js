@@ -1,3 +1,10 @@
+process.on('uncaughtException', (err) => {
+  console.error('[process] uncaughtException:', err.message, err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection:', reason);
+});
+
 const cron = require('node-cron');
 const config = require('./config');
 const manyfood = require('./manyfood');
