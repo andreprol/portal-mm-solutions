@@ -11,6 +11,7 @@ const manyfood = require('./manyfood');
 const hana = require('./hana');
 const email = require('./email');
 const db = require('./db');
+const { portalDateToIso, storeToWhsCode, minDate, maxDate } = require('./utils');
 
 hana.init(config.hana);
 email.init(config.graph, config.graph.fromEmail);
@@ -19,28 +20,6 @@ function dateOffset(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
-}
-
-function portalDateToIso(s) {
-  const [d, m, y] = s.split('/');
-  return `${y}-${m}-${d}`;
-}
-
-// "6 - Cittá Delirio Restaurante" → "06"
-// "14 - Delirio Tropical Niteroi Plaza" → "14"
-function storeToWhsCode(storeName) {
-  const match = storeName.match(/^(\d+)\s*-/);
-  if (!match) return null;
-  const n = parseInt(match[1], 10);
-  return String(n).padStart(2, '0');
-}
-
-// Compares two DD/MM/YYYY date strings, returning the earlier one.
-function minDate(a, b) {
-  return portalDateToIso(a) <= portalDateToIso(b) ? a : b;
-}
-function maxDate(a, b) {
-  return portalDateToIso(a) >= portalDateToIso(b) ? a : b;
 }
 
 async function run() {
