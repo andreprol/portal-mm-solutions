@@ -36,5 +36,6 @@
     "recipients_case3": ["admin@yourdomain.com"]
   },
   "phase": 1,
-  "schedule_case3": "0 6 * * *"
+  "schedule_case3": "30 6 * * *",
+  "healthPort": 3849
 }

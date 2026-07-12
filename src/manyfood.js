@@ -8,6 +8,7 @@ const BASE = 'https://manyfood.manyminds.com.br';
 // Persistent session across calls within the same process
 let client = null;
 let jar = null;
+let lastCredentials = null;
 
 function buildClient() {
   jar = new CookieJar();
@@ -30,7 +31,8 @@ async function getCsrfToken() {
 }
 
 async function login(user, password) {
-  if (!client) buildClient();
+  lastCredentials = { user, password };
+  buildClient(); // always rebuild client/jar on login to clear stale session
 
   // Load login page to receive the CodeIgniter CSRF cookie
   await client.get('/Login');
@@ -56,15 +58,20 @@ async function login(user, password) {
   console.log('[manyfood] session established');
 }
 
-async function post(path, params) {
+async function post(path, params, _isRetry = false) {
   const csrfToken = await getCsrfToken();
   const resp = await client.post(path, qs.stringify({ ...params, ci_csrf_token: csrfToken }), {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   });
 
-  // Session expired if response redirects back to login form
+  // Session expired — re-login once and retry automatically.
   if (String(resp.data).includes('id="usuario"')) {
-    throw new Error('ManyFood session expired');
+    if (_isRetry || !lastCredentials) {
+      throw new Error('ManyFood session expired');
+    }
+    console.warn('[manyfood] session expired — re-logging in');
+    await login(lastCredentials.user, lastCredentials.password);
+    return post(path, params, true);
   }
 
   const data = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data;

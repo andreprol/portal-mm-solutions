@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { portalDateToIso } = require('./utils');
 
 let graphConfig = null;
 let fromEmail = null;
@@ -196,11 +197,6 @@ function buildCase2AlertEmail(errors) {
     <p class="footer">Detectado em ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} (horário de Brasília)</p>
     </body></html>
   `;
-}
-
-function portalDateToIso(s) {
-  const [d, m, y] = (s || '').split('/');
-  return y ? `${y}-${m}-${d}` : s;
 }
 
 function buildCase2ActionEmail(results) {

@@ -5,16 +5,20 @@ process.on('unhandledRejection', (reason) => {
   console.error('[process] unhandledRejection:', reason);
 });
 
+const http = require('http');
 const cron = require('node-cron');
 const config = require('./config');
 const manyfood = require('./manyfood');
 const hana = require('./hana');
 const email = require('./email');
 const db = require('./db');
-const { portalDateToIso, storeToWhsCode, minDate, maxDate } = require('./utils');
+const { storeToWhsCode, minDate, maxDate } = require('./utils');
 
 hana.init(config.hana);
 email.init(config.graph, config.graph.fromEmail);
+
+let lastRunAt = null;
+let lastCase3At = null;
 
 function dateOffset(days) {
   const d = new Date();
@@ -81,6 +85,7 @@ async function run() {
   console.log(`[runner] ${errorMap.size} unique item+store pairs with zero-cost errors`);
   if (errorMap.size === 0) {
     console.log('[runner] no zero-cost errors found. Done.');
+    lastRunAt = new Date().toISOString();
     return;
   }
 
@@ -134,10 +139,15 @@ async function run() {
     const { costInfo, bomRows } = cached;
     if (!costInfo.hasCost) {
       // Case 1 — OITW.AvgPrice = 0 at the store's warehouse → no receiving history at this location
+      if (db.wasProcessedThisWeek(itemCode, store, 1)) {
+        console.log(`[dedup] case1 skip ${itemCode}@${store} (alerted this week)`);
+        continue;
+      }
       case1.push(group);
     } else if (bomRows.length > 0) {
       // Case 2 — has cost but BOM contribution < R$0.01 → ficha técnica issue
       if (config.phase >= 2) {
+        // Phase 2: auto-remove (no dedup — always report actions taken)
         const results = [];
         for (const bom of bomRows) {
           try {
@@ -149,6 +159,10 @@ async function run() {
         }
         case2Action.push(...results);
       } else {
+        if (db.wasProcessedThisWeek(itemCode, store, 2)) {
+          console.log(`[dedup] case2 skip ${itemCode}@${store} (alerted this week)`);
+          continue;
+        }
         case2Alert.push({ ...group, bomRows });
       }
     } else {
@@ -170,11 +184,15 @@ async function run() {
         console.error(`[hana] findBomPathsFallback ${itemCode} failed:`, e.message);
       }
 
+      if (db.wasProcessedThisWeek(itemCode, store, 2)) {
+        console.log(`[dedup] case2-fallback skip ${itemCode}@${store} (alerted this week)`);
+        continue;
+      }
       case2Alert.push({ ...group, bomRows: fallbackRows });
     }
   }
 
-  // --- Step 4: send emails ---
+  // --- Step 4: send emails, mark processed on success ---
   if (case1.length > 0) {
     try {
       await email.send(
@@ -182,6 +200,7 @@ async function run() {
         `[Portal MM] Caso 1 — ${case1.length} item(s) sem custo — sem histórico de entrada`,
         email.buildCase1Email(case1)
       );
+      for (const item of case1) db.markProcessed(item.itemCode, item.store, 1, 'alert');
     } catch (e) {
       console.error('[email] case1 send failed:', e.message);
     }
@@ -195,6 +214,7 @@ async function run() {
         `[Portal MM] Caso 2 — ${uniqueProducts} produto(s) sem custo — contribuição ínfima em ficha técnica`,
         email.buildCase2AlertEmail(case2Alert)
       );
+      for (const item of case2Alert) db.markProcessed(item.itemCode, item.store, 2, 'alert');
     } catch (e) {
       console.error('[email] case2 alert send failed:', e.message);
     }
@@ -213,17 +233,28 @@ async function run() {
   }
 
   console.log(`[runner] done. case1=${case1.length} case2alert=${case2Alert.length} case2action=${case2Action.length}`);
+  lastRunAt = new Date().toISOString();
 }
 
 // Case 3: proactive daily sweep — find all BOM paths where the item's MIN price
 // across monitored stores yields a contribution < R$0.01, before ManyFood flags it.
 async function runCase3() {
   console.log('[case3] starting proactive BOM sweep');
-  const whsCodes = config.filiais.map(f => storeToWhsCode(f.nome));
+
+  // Filter out nulls from filiais without a valid "N - Name" nome prefix.
+  const whsCodes = (config.filiais || [])
+    .map(f => storeToWhsCode(f.nome))
+    .filter(Boolean);
+
+  if (whsCodes.length === 0) {
+    console.error('[case3] no valid whsCodes from config.filiais — aborting sweep');
+    return;
+  }
 
   let rows = [];
   try {
-    await hana.connect();
+    // No explicit hana.connect() here — lazy-connect inside query() handles it.
+    // Calling hana.connect() resets the shared conn and can disrupt concurrent run() queries.
     rows = await hana.sweepBomByMinCost(whsCodes, config.hana.database);
     console.log(`[case3] sweep complete: ${rows.length} path(s) with contribution < R$0.01`);
   } catch (e) {
@@ -242,6 +273,7 @@ async function runCase3() {
     } catch (e) {
       console.error('[case3] all-clear email send failed:', e.message);
     }
+    lastCase3At = new Date().toISOString();
     return;
   }
 
@@ -295,17 +327,34 @@ async function runCase3() {
       console.error('[case3] email send failed:', e.message);
     }
   }
+
+  lastCase3At = new Date().toISOString();
 }
 
-run().catch(err => console.error('[runner] unhandled error:', err));
-runCase3().catch(err => console.error('[case3] unhandled error:', err));
+// Health check endpoint — verify the process is alive and when it last ran.
+const healthPort = config.healthPort || 3849;
+http.createServer((req, res) => {
+  if (req.url !== '/health') { res.writeHead(404); res.end(); return; }
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    status: 'ok',
+    lastRunAt,
+    lastCase3At,
+    schedule: config.schedule,
+    schedule_case3: config.schedule_case3 || '30 6 * * *',
+  }));
+}).listen(healthPort, () => {
+  console.log(`[health] listening on :${healthPort}`);
+});
+
+const schedule_case3 = config.schedule_case3 || '30 6 * * *';
 
 cron.schedule(config.schedule, () => {
   run().catch(err => console.error('[runner] unhandled error:', err));
 });
 
-cron.schedule(config.schedule_case3 || '0 6 * * *', () => {
+cron.schedule(schedule_case3, () => {
   runCase3().catch(err => console.error('[case3] unhandled error:', err));
 });
 
-console.log(`[portal-mm-solutions] scheduled: ${config.schedule} | case3: ${config.schedule_case3 || '0 6 * * *'}`);
+console.log(`[portal-mm-solutions] scheduled: ${config.schedule} | case3: ${schedule_case3} | health: :${healthPort}`);
