@@ -30,6 +30,7 @@
     "fromEmail": "alerts@yourdomain.com"
   },
   "email": {
+    "recipients_ops": ["admin@yourdomain.com"],
     "recipients_case1": ["admin@yourdomain.com"],
     "recipients_case2_alert": ["admin@yourdomain.com"],
     "recipients_case2_action": ["admin@yourdomain.com"],

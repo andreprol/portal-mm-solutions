@@ -21,6 +21,8 @@ function init(cfg) {
   config = cfg;
 }
 
+const CONNECT_TIMEOUT_MS = 15000;
+
 async function connect() {
   if (!driver) throw new Error('No HANA driver found. Run: npm install hdb');
 
@@ -30,27 +32,33 @@ async function connect() {
   }
 
   const params = { host: config.host, port: config.port, user: config.user, password: config.password };
+  let newConn = null;
 
-  await new Promise((resolve, reject) => {
-    if (driverName === 'hana-client') {
-      conn = driver.createConnection();
-      conn.connect(params, err => err ? reject(err) : resolve());
-    } else {
-      // hdb npm package
-      conn = driver.createClient(params);
-      conn.connect(err => err ? reject(err) : resolve());
-    }
-  });
+  await Promise.race([
+    new Promise((resolve, reject) => {
+      if (driverName === 'hana-client') {
+        newConn = driver.createConnection();
+        newConn.connect(params, err => err ? reject(err) : resolve());
+      } else {
+        newConn = driver.createClient(params);
+        newConn.connect(err => err ? reject(err) : resolve());
+      }
+    }),
+    new Promise((_, reject) => setTimeout(() => {
+      try { if (newConn) newConn.disconnect(); } catch {}
+      reject(new Error(`HANA connect timeout after ${CONNECT_TIMEOUT_MS}ms`));
+    }, CONNECT_TIMEOUT_MS)),
+  ]);
+
+  conn = newConn;
 
   // hdb emits async 'error' events on TCP drop (VPN flapping).
   // Without a listener, Node throws uncaughtException and crashes.
   // Setting conn = null lets the lazy-connect in query() reconnect on next call.
-  if (conn) {
-    conn.on('error', (err) => {
-      console.error('[hana] connection error (async):', err.message);
-      conn = null;
-    });
-  }
+  conn.on('error', (err) => {
+    console.error('[hana] connection error (async):', err.message);
+    conn = null;
+  });
 }
 
 async function query(sql, params = []) {

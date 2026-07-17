@@ -1,3 +1,5 @@
+'use strict';
+
 process.on('uncaughtException', (err) => {
   console.error('[process] uncaughtException:', err.message, err.stack);
 });
@@ -5,349 +7,32 @@ process.on('unhandledRejection', (reason) => {
   console.error('[process] unhandledRejection:', reason);
 });
 
-const http = require('http');
-const cron = require('node-cron');
+const http   = require('http');
+const cron   = require('node-cron');
 const config = require('./config');
-const manyfood = require('./manyfood');
-const hana = require('./hana');
-const email = require('./email');
-const db = require('./db');
-const { storeToWhsCode, minDate, maxDate } = require('./utils');
+const hana   = require('./hana');
+const email  = require('./email');
+const { run, runCase3, getLastRunAt, getLastCase3At } = require('./runner');
 
 hana.init(config.hana);
 email.init(config.graph, config.graph.fromEmail);
 
-let lastRunAt = null;
-let lastCase3At = null;
+const healthPort    = config.healthPort || 3849;
+const schedule_case3 = config.schedule_case3 || '30 6 * * *';
 
-function dateOffset(days) {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-async function run() {
-  console.log(`[runner] starting check at ${new Date().toISOString()}`);
-
-  // --- Step 1: login once, then collect errors from every configured store ---
-  try {
-    await manyfood.login(config.manyfood.user, config.manyfood.password);
-  } catch (err) {
-    console.error('[runner] login failed:', err.message);
-    return;
-  }
-
-  const dateEnd   = dateOffset(0);
-  const dateStart = dateOffset(-(config.lookbackDays || 90));
-
-  const filiais = config.filiais || [];
-  if (filiais.length === 0) {
-    console.warn('[runner] config.filiais is empty — add store IDs to config.json');
-  }
-
-  // Collect all zero-cost errors across all stores.
-  // Key: `${itemCode}|${store}` → grouped error record.
-  const errorMap = new Map();
-
-  for (const filial of filiais) {
-    try {
-      await manyfood.switchFilial(filial.id);
-    } catch (err) {
-      console.error(`[runner] switchFilial ${filial.id} failed:`, err.message);
-      continue;
-    }
-
-    let rawErrors;
-    try {
-      rawErrors = await manyfood.getErrorsForPeriod(dateStart, dateEnd);
-    } catch (err) {
-      console.error(`[runner] getErrorsForPeriod filial ${filial.id} failed:`, err.message);
-      continue;
-    }
-
-    const zeroCost = manyfood.parseZeroCostErrors(rawErrors);
-    console.log(`[runner] filial ${filial.id} (${filial.nome}): ${rawErrors.length} total, ${zeroCost.length} zero-cost`);
-
-    for (const err of zeroCost) {
-      const key = `${err.itemCode}|${err.store}`;
-      if (!errorMap.has(key)) {
-        errorMap.set(key, { ...err, firstDate: err.date, lastDate: err.date, occurrences: 1, errorDates: new Set([err.date]) });
-      } else {
-        const g = errorMap.get(key);
-        g.firstDate   = minDate(g.firstDate, err.date);
-        g.lastDate    = maxDate(g.lastDate, err.date);
-        g.occurrences += 1;
-        g.errorDates.add(err.date);
-      }
-    }
-  }
-
-  console.log(`[runner] ${errorMap.size} unique item+store pairs with zero-cost errors`);
-  if (errorMap.size === 0) {
-    console.log('[runner] no zero-cost errors found. Done.');
-    lastRunAt = new Date().toISOString();
-    return;
-  }
-
-  // --- Step 2: classify each unique (itemCode, store) pair via HANA ---
-  // HANA check is per-pair because the same item may have cost at one store but not another.
-  // WhsCode is derived from the ManyFood store name number prefix (e.g. "6 - Cittá" → "06").
-  const hanaCache = {};
-
-  for (const [key, group] of errorMap) {
-    const { itemCode, store } = group;
-    const whsCode = storeToWhsCode(store);
-
-    let costInfo;
-    try {
-      costInfo = await hana.checkItemCost(itemCode, whsCode, config.hana.database);
-    } catch (e) {
-      console.error(`[hana] checkItemCost ${itemCode}@${whsCode} failed:`, e.message);
-      // HANA error: skip this pair to avoid false Case 1 alerts
-      hanaCache[key] = null;
-      continue;
-    }
-
-    let bomRows = [];
-    if (costInfo.hasCost) {
-      try {
-        // L1: direct BOM entries with contribution < R$0.01
-        // L2: item in sub-recipe, sub-recipe in another ficha — effective contribution < R$0.01
-        // Both levels returned in a single query; no separate nested BOM loop needed.
-        bomRows = await hana.checkBomContribution(itemCode, whsCode, config.hana.database);
-      } catch (e) {
-        console.error(`[hana] checkBomContribution ${itemCode} failed:`, e.message);
-      }
-    }
-
-    hanaCache[key] = { costInfo, bomRows };
-  }
-
-  // --- Step 3: route each group to Case 1 or Case 2, applying weekly dedup ---
-  const case1       = [];
-  const case2Alert  = [];
-  const case2Action = [];
-
-  for (const [key, group] of errorMap) {
-    const { itemCode, store } = group;
-    const whsCode = storeToWhsCode(store);
-    const cached = hanaCache[key];
-
-    // HANA query failed for this pair — skip to avoid false positives
-    if (cached === null) continue;
-
-    const { costInfo, bomRows } = cached;
-    if (!costInfo.hasCost) {
-      // Case 1 — OITW.AvgPrice = 0 at the store's warehouse → no receiving history at this location
-      if (db.wasProcessedThisWeek(itemCode, store, 1)) {
-        console.log(`[dedup] case1 skip ${itemCode}@${store} (alerted this week)`);
-        continue;
-      }
-      case1.push(group);
-    } else if (bomRows.length > 0) {
-      // Case 2 — has cost but BOM contribution < R$0.01 → ficha técnica issue
-      if (config.phase >= 2) {
-        // Phase 2: auto-remove (no dedup — always report actions taken)
-        const results = [];
-        for (const bom of bomRows) {
-          try {
-            await hana.removeFromBom(itemCode, bom.bomParent, config.hana.database);
-            results.push({ ...group, bomParent: bom.bomParent, success: true });
-          } catch (e) {
-            results.push({ ...group, bomParent: bom.bomParent, success: false, error: e.message });
-          }
-        }
-        case2Action.push(...results);
-      } else {
-        if (db.wasProcessedThisWeek(itemCode, store, 2)) {
-          console.log(`[dedup] case2 skip ${itemCode}@${store} (alerted this week)`);
-          continue;
-        }
-        case2Alert.push({ ...group, bomRows });
-      }
-    } else {
-      // hasCost=true but strict check returned 0 rows — price may have dipped on the error date.
-      // Use fallback to find the lowest-contribution path as the most likely culprit.
-      let fallbackRows = [];
-      try {
-        const allPaths = await hana.findBomPathsFallback(itemCode, whsCode, config.hana.database);
-        // HANA returns computed columns as strings — parse to Number.
-        // Strict check found nothing < R$0.01 today, but the ManyFood error is real.
-        // Report the single lowest-contribution path as the most likely historical culprit.
-        const best = allPaths[0];
-        const bestContrib = best ? Number(best.contribution) || 0 : 0;
-        fallbackRows = best ? [best] : [];
-        if (fallbackRows.length > 0) {
-          console.log(`[hana] fallback found 1 path for ${itemCode}@${whsCode} (contribution: ${bestContrib.toFixed(4)})`);
-        }
-      } catch (e) {
-        console.error(`[hana] findBomPathsFallback ${itemCode} failed:`, e.message);
-      }
-
-      if (db.wasProcessedThisWeek(itemCode, store, 2)) {
-        console.log(`[dedup] case2-fallback skip ${itemCode}@${store} (alerted this week)`);
-        continue;
-      }
-      case2Alert.push({ ...group, bomRows: fallbackRows });
-    }
-  }
-
-  // --- Step 4: send emails, mark processed on success ---
-  if (case1.length > 0) {
-    try {
-      await email.send(
-        config.email.recipients_case1,
-        `[Portal MM] Caso 1 — ${case1.length} item(s) sem custo — sem histórico de entrada`,
-        email.buildCase1Email(case1)
-      );
-      for (const item of case1) db.markProcessed(item.itemCode, item.store, 1, 'alert');
-    } catch (e) {
-      console.error('[email] case1 send failed:', e.message);
-    }
-  }
-
-  if (case2Alert.length > 0) {
-    try {
-      const uniqueProducts = new Set(case2Alert.map(e => e.itemCode)).size;
-      await email.send(
-        config.email.recipients_case2_alert,
-        `[Portal MM] Caso 2 — ${uniqueProducts} produto(s) sem custo — contribuição ínfima em ficha técnica`,
-        email.buildCase2AlertEmail(case2Alert)
-      );
-      for (const item of case2Alert) db.markProcessed(item.itemCode, item.store, 2, 'alert');
-    } catch (e) {
-      console.error('[email] case2 alert send failed:', e.message);
-    }
-  }
-
-  if (case2Action.length > 0) {
-    try {
-      await email.send(
-        config.email.recipients_case2_action,
-        `[Portal MM] Relatório de remoção automática — ${case2Action.filter(r => r.success).length} entrada(s) de ficha técnica removida(s)`,
-        email.buildCase2ActionEmail(case2Action)
-      );
-    } catch (e) {
-      console.error('[email] case2 action send failed:', e.message);
-    }
-  }
-
-  console.log(`[runner] done. case1=${case1.length} case2alert=${case2Alert.length} case2action=${case2Action.length}`);
-  lastRunAt = new Date().toISOString();
-}
-
-// Case 3: proactive daily sweep — find all BOM paths where the item's MIN price
-// across monitored stores yields a contribution < R$0.01, before ManyFood flags it.
-async function runCase3() {
-  console.log('[case3] starting proactive BOM sweep');
-
-  // Filter out nulls from filiais without a valid "N - Name" nome prefix.
-  const whsCodes = (config.filiais || [])
-    .map(f => storeToWhsCode(f.nome))
-    .filter(Boolean);
-
-  if (whsCodes.length === 0) {
-    console.error('[case3] no valid whsCodes from config.filiais — aborting sweep');
-    return;
-  }
-
-  let rows = [];
-  try {
-    // No explicit hana.connect() here — lazy-connect inside query() handles it.
-    // Calling hana.connect() resets the shared conn and can disrupt concurrent run() queries.
-    rows = await hana.sweepBomByMinCost(whsCodes, config.hana.database);
-    console.log(`[case3] sweep complete: ${rows.length} path(s) with contribution < R$0.01`);
-  } catch (e) {
-    console.error('[case3] HANA sweep failed:', e.message);
-    return;
-  }
-
-  if (rows.length === 0) {
-    console.log('[case3] no issues found — sending all-clear email');
-    try {
-      await email.send(
-        config.email.recipients_case3 || config.email.recipients_case2_alert,
-        `[Portal MM] Caso 3 — Nenhuma ficha técnica com risco de custo ínfimo`,
-        email.buildCase3AllClearEmail()
-      );
-    } catch (e) {
-      console.error('[case3] all-clear email send failed:', e.message);
-    }
-    lastCase3At = new Date().toISOString();
-    return;
-  }
-
-  if (config.phase >= 2) {
-    // Phase 2: auto-remove each unique (itemCode, father) pair from ITT1.
-    // L1: father = bomParent | L2: father = via (sub-recipe where the item lives directly)
-    const pathsMap = new Map();
-    for (const r of rows) {
-      const father = r.via || r.bomParent;
-      const key = `${r.itemCode}|${father}`;
-      if (!pathsMap.has(key)) {
-        pathsMap.set(key, { itemCode: r.itemCode, itemName: r.itemName || '', father, bomParent: r.bomParent, level: r.level, via: r.via || null, minPrice: Number(r.minPrice) || 0, qty1: Number(r.qty1) || 0, qty2: r.qty2 != null ? Number(r.qty2) : null, contribution: Number(r.contribution) || 0 });
-      }
-    }
-
-    const results = [];
-    for (const p of pathsMap.values()) {
-      try {
-        await hana.removeFromBom(p.itemCode, p.father, config.hana.database);
-        console.log(`[case3] removed ${p.itemCode} from ${p.father}`);
-        results.push({ ...p, success: true });
-      } catch (e) {
-        console.error(`[case3] failed to remove ${p.itemCode} from ${p.father}:`, e.message);
-        results.push({ ...p, success: false, error: e.message });
-      }
-    }
-
-    const removed = results.filter(r => r.success).length;
-    const failed  = results.length - removed;
-    console.log(`[case3] phase2 done: ${removed} removed, ${failed} failed`);
-
-    try {
-      await email.send(
-        config.email.recipients_case3 || config.email.recipients_case2_alert,
-        `[Portal MM] Caso 3 — ${removed} entrada(s) removida(s) de ficha técnica${failed > 0 ? ` (${failed} falha(s))` : ''}`,
-        email.buildCase3ActionEmail(results)
-      );
-    } catch (e) {
-      console.error('[case3] email send failed:', e.message);
-    }
-  } else {
-    // Phase 1: alert only
-    try {
-      const uniqueItems = new Set(rows.map(r => r.itemCode)).size;
-      await email.send(
-        config.email.recipients_case3 || config.email.recipients_case2_alert,
-        `[Portal MM] Caso 3 — ${uniqueItems} produto(s) com risco de custo ínfimo em ficha técnica`,
-        email.buildCase3Email(rows)
-      );
-    } catch (e) {
-      console.error('[case3] email send failed:', e.message);
-    }
-  }
-
-  lastCase3At = new Date().toISOString();
-}
-
-// Health check endpoint — verify the process is alive and when it last ran.
-const healthPort = config.healthPort || 3849;
 http.createServer((req, res) => {
   if (req.url !== '/health') { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     status: 'ok',
-    lastRunAt,
-    lastCase3At,
-    schedule: config.schedule,
-    schedule_case3: config.schedule_case3 || '30 6 * * *',
+    lastRunAt:   getLastRunAt(),
+    lastCase3At: getLastCase3At(),
+    schedule:    config.schedule,
+    schedule_case3,
   }));
 }).listen(healthPort, () => {
   console.log(`[health] listening on :${healthPort}`);
 });
-
-const schedule_case3 = config.schedule_case3 || '30 6 * * *';
 
 cron.schedule(config.schedule, () => {
   run().catch(err => console.error('[runner] unhandled error:', err));
