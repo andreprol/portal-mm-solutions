@@ -17,14 +17,16 @@ const { run, runCase3, getLastRunAt, getLastCase3At } = require('./runner');
 hana.init(config.hana);
 email.init(config.graph, config.graph.fromEmail);
 
-const healthPort    = config.healthPort || 3849;
+const healthPort     = config.healthPort || 3849;
 const schedule_case3 = config.schedule_case3 || '30 6 * * *';
+const startedAt      = new Date().toISOString();
 
 http.createServer((req, res) => {
   if (req.url !== '/health') { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     status: 'ok',
+    startedAt,
     lastRunAt:   getLastRunAt(),
     lastCase3At: getLastCase3At(),
     schedule:    config.schedule,

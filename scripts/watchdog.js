@@ -131,14 +131,19 @@ async function main() {
   const issues = [];
   const now    = Date.now();
 
+  const uptimeH = health.data.startedAt
+    ? (now - new Date(health.data.startedAt).getTime()) / 3600000
+    : MAX_RUN_AGE_H + 1; // se não tem startedAt (versão antiga), assume tempo suficiente
+
   if (health.data.lastRunAt) {
     const ageH = (now - new Date(health.data.lastRunAt).getTime()) / 3600000;
     if (ageH > MAX_RUN_AGE_H) {
       issues.push(`lastRunAt: ${health.data.lastRunAt} — ${ageH.toFixed(1)}h atrás (máx ${MAX_RUN_AGE_H}h)`);
     }
-  } else {
-    const info = `lastRunAt: null — run() nunca completou desde o startup`;
-    issues.push(info);
+  } else if (uptimeH > MAX_RUN_AGE_H) {
+    // Só alerta se o processo está no ar há mais de MAX_RUN_AGE_H sem rodar nenhum ciclo.
+    // Nas primeiras horas após startup é normal — cron ainda não disparou.
+    issues.push(`lastRunAt: null — run() nunca completou (processo no ar há ${uptimeH.toFixed(1)}h)`);
   }
 
   if (health.data.lastCase3At) {
