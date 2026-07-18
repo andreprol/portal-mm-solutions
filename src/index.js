@@ -11,6 +11,7 @@ const http   = require('http');
 const cron   = require('node-cron');
 const config = require('./config');
 const hana   = require('./hana');
+const { getDriverName } = hana;
 const email  = require('./email');
 const { run, runCase3, getLastRunAt, getLastCase3At } = require('./runner');
 
@@ -25,8 +26,9 @@ http.createServer((req, res) => {
   if (req.url !== '/health') { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
-    status: 'ok',
+    status:      'ok',
     startedAt,
+    hanaDriver:  getDriverName(),
     lastRunAt:   getLastRunAt(),
     lastCase3At: getLastCase3At(),
     schedule:    config.schedule,

@@ -5,13 +5,20 @@ let driverName = null;
 try {
   driver = require('@sap/hana-client');
   driverName = 'hana-client';
-} catch {
+} catch (e1) {
   try {
     driver = require('hdb');
     driverName = 'hdb';
-  } catch {
+  } catch (e2) {
     driver = null;
+    console.error('[hana] STARTUP: no driver loaded. @sap/hana-client:', e1.message, '| hdb:', e2.message);
   }
+}
+
+if (driver) {
+  console.log(`[hana] STARTUP: driver="${driverName}" loaded OK`);
+} else {
+  console.error('[hana] STARTUP: driver=null — HANA queries will fail. Run: npm install hdb');
 }
 
 let conn = null;
@@ -276,4 +283,6 @@ async function sweepBomByMinCost(whsCodes, database) {
   return await query(sql, [...whsCodes, ...whsCodes]);
 }
 
-module.exports = { init, connect, checkItemCost, checkBomContribution, findBomPathsFallback, removeFromBom, sweepBomByMinCost };
+function getDriverName() { return driverName; }
+
+module.exports = { init, connect, checkItemCost, checkBomContribution, findBomPathsFallback, removeFromBom, sweepBomByMinCost, getDriverName };
