@@ -2,6 +2,7 @@ module.exports = {
   apps: [{
     name: 'portal-mm-solutions',
     script: 'src/index.js',
+    cwd: '/opt/portal-mm-solutions',
     max_restarts: 50,
     min_uptime: 10000,
     restart_delay: 15000,
