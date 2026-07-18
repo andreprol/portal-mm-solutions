@@ -33,13 +33,17 @@ const req = http.request({ host, port, path: '/health', method: 'GET' }, (res) =
   });
 });
 
+let timedOut = false;
+
 req.setTimeout(timeout, () => {
+  timedOut = true;
   console.error(`[smoke] FAIL: /health timeout after ${timeout}ms`);
   req.destroy();
   process.exit(1);
 });
 
 req.on('error', (err) => {
+  if (timedOut) return;
   console.error('[smoke] FAIL: connection error:', err.message);
   process.exit(1);
 });

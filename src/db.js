@@ -18,28 +18,31 @@ const SCHEMA = `
 // Factory — allows tests to pass ':memory:' for isolation.
 function createDb(dbPath) {
   if (dbPath !== ':memory:') {
-    const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   }
 
   const instance = new Database(dbPath);
+  instance.pragma('busy_timeout = 10000');
   instance.exec(SCHEMA);
+
+  const stmtWasProcessed = instance.prepare(
+    `SELECT id FROM processed_errors
+     WHERE item_code = ? AND store = ? AND case_type = ? AND processed_at >= ?`
+  );
+
+  const stmtMark = instance.prepare(
+    `INSERT OR REPLACE INTO processed_errors(item_code, store, case_type, action, processed_at)
+     VALUES(?, ?, ?, ?, datetime('now'))`
+  );
 
   function wasProcessedThisWeek(itemCode, store, caseType) {
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
       .toISOString().slice(0, 19).replace('T', ' ');
-    const row = instance.prepare(
-      `SELECT id FROM processed_errors
-       WHERE item_code = ? AND store = ? AND case_type = ? AND processed_at >= ?`
-    ).get(itemCode, store, caseType, cutoff);
-    return !!row;
+    return !!stmtWasProcessed.get(itemCode, store, caseType, cutoff);
   }
 
   function markProcessed(itemCode, store, caseType, action) {
-    instance.prepare(
-      `INSERT OR REPLACE INTO processed_errors(item_code, store, case_type, action, processed_at)
-       VALUES(?, ?, ?, ?, datetime('now'))`
-    ).run(itemCode, store, caseType, action);
+    stmtMark.run(itemCode, store, caseType, action);
   }
 
   function close() { instance.close(); }
@@ -49,4 +52,9 @@ function createDb(dbPath) {
 
 const defaultDb = createDb(path.join(__dirname, '..', 'data', 'state.db'));
 
-module.exports = { ...defaultDb, createDb };
+module.exports = {
+  wasProcessedThisWeek: defaultDb.wasProcessedThisWeek,
+  markProcessed:        defaultDb.markProcessed,
+  close:                defaultDb.close,
+  createDb,
+};

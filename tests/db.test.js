@@ -48,6 +48,14 @@ describe('db — dedup logic', () => {
     expect(db.wasProcessedThisWeek('CODE1', 'Loja A', 1)).toBe(true);
   });
 
+  test('record at exactly 7 days boundary is included (>= comparison)', () => {
+    db._db.prepare(
+      `INSERT INTO processed_errors(item_code, store, case_type, action, processed_at)
+       VALUES(?, ?, ?, ?, datetime('now', '-7 days'))`
+    ).run('CODE1', 'Loja A', 1, 'alert');
+    expect(db.wasProcessedThisWeek('CODE1', 'Loja A', 1)).toBe(true);
+  });
+
   test('multiple distinct keys coexist without interference', () => {
     db.markProcessed('CODE1', 'Loja A', 1, 'alert');
     db.markProcessed('CODE2', 'Loja A', 1, 'alert');
