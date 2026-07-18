@@ -266,6 +266,21 @@ async function run() {
   lastRunAt = new Date().toISOString();
 }
 
+const CASE3_MAX_ATTEMPTS = 3;
+const CASE3_RETRY_DELAY_MS = 2 * 60 * 1000; // 2 min — VPN reconnects within 5s, 2 min ensures stable window
+
+async function sweepWithRetry(whsCodes, database) {
+  for (let attempt = 1; attempt <= CASE3_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await hana.sweepBomByMinCost(whsCodes, database);
+    } catch (e) {
+      if (attempt === CASE3_MAX_ATTEMPTS) throw e;
+      console.warn(`[case3] sweep attempt ${attempt}/${CASE3_MAX_ATTEMPTS} failed (${e.message}), retrying in ${CASE3_RETRY_DELAY_MS / 1000}s`);
+      await new Promise(resolve => setTimeout(resolve, CASE3_RETRY_DELAY_MS));
+    }
+  }
+}
+
 async function runCase3() {
   console.log('[case3] starting proactive BOM sweep');
 
@@ -280,11 +295,11 @@ async function runCase3() {
 
   let rows = [];
   try {
-    rows = await hana.sweepBomByMinCost(whsCodes, config.hana.database);
+    rows = await sweepWithRetry(whsCodes, config.hana.database);
     console.log(`[case3] sweep complete: ${rows.length} path(s) with contribution < R$0.01`);
   } catch (e) {
-    console.error('[case3] HANA sweep failed:', e.message);
-    await sendOpsAlert('[Case3] HANA sweep falhou', e.message);
+    console.error('[case3] HANA sweep failed after all attempts:', e.message);
+    await sendOpsAlert('[Case3] HANA sweep falhou após 3 tentativas', e.message);
     return;
   }
 
