@@ -47,7 +47,9 @@ async function connect() {
         newConn = driver.createConnection();
         newConn.connect(params, err => err ? reject(err) : resolve());
       } else {
-        newConn = driver.createClient(params);
+        // heartbeatInterval keeps TCP alive during long-running queries (e.g. Case 3 UNION ALL sweep).
+        // Without it, VPN drops the idle TCP socket after ~30s → ETIMEDOUT.
+        newConn = driver.createClient({ ...params, heartbeatInterval: 10000 });
         newConn.connect(err => err ? reject(err) : resolve());
       }
     }),
