@@ -96,6 +96,10 @@ async function queryOnce(sql, params) {
   });
 }
 
+// VPN reconnect takes ~6s after a flap. Wait longer before retrying HANA connect
+// to avoid racing against an OpenVPN restart that hasn't completed yet.
+const VPN_RECONNECT_WAIT_MS = 9000;
+
 async function query(sql, params = []) {
   if (!conn) await connect();
 
@@ -105,8 +109,9 @@ async function query(sql, params = []) {
     return await queryOnce(sql, params);
   } catch (err) {
     if (!isRetryable(err)) throw err;
-    // VPN flap or stale TCP: reconnect once and retry.
-    console.warn('[hana] retrying after transient error:', err.message);
+    // VPN flap or stale TCP: wait for VPN to finish reconnecting, then retry once.
+    console.warn(`[hana] transient error, waiting ${VPN_RECONNECT_WAIT_MS}ms before retry:`, err.message);
+    await new Promise(resolve => setTimeout(resolve, VPN_RECONNECT_WAIT_MS));
     await connect();
     return await queryOnce(sql, params);
   }
