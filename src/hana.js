@@ -70,11 +70,12 @@ async function connect() {
   });
 }
 
-async function query(sql, params = []) {
-  if (!conn) await connect();
+function isRetryable(err) {
+  const msg = (err && err.message) || '';
+  return msg.includes('Connection closed') || msg.includes('ETIMEDOUT') || msg.includes('connect timeout');
+}
 
-  // hdb requires prepare+exec for parameterized queries;
-  // @sap/hana-client supports conn.exec(sql, params, cb) directly.
+async function queryOnce(sql, params) {
   if (params.length === 0 || driverName === 'hana-client') {
     return new Promise((resolve, reject) => {
       conn.exec(sql, params, (err, rows) => {
@@ -93,6 +94,22 @@ async function query(sql, params = []) {
       });
     });
   });
+}
+
+async function query(sql, params = []) {
+  if (!conn) await connect();
+
+  // hdb requires prepare+exec for parameterized queries;
+  // @sap/hana-client supports conn.exec(sql, params, cb) directly.
+  try {
+    return await queryOnce(sql, params);
+  } catch (err) {
+    if (!isRetryable(err)) throw err;
+    // VPN flap or stale TCP: reconnect once and retry.
+    console.warn('[hana] retrying after transient error:', err.message);
+    await connect();
+    return await queryOnce(sql, params);
+  }
 }
 
 // Case 1: check whether the item has cost (AvgPrice > 0) in a specific warehouse.
