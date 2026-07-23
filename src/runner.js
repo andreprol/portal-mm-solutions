@@ -4,7 +4,6 @@ const config   = require('./config');
 const manyfood = require('./manyfood');
 const hana     = require('./hana');
 const email    = require('./email');
-const db       = require('./db');
 const { storeToWhsCode, minDate, maxDate } = require('./utils');
 
 let lastRunAt        = null;
@@ -162,7 +161,7 @@ async function run() {
     );
   }
 
-  // Step 3: route to Case 1 / Case 2, applying weekly dedup
+  // Step 3: route to Case 1 / Case 2
   const case1       = [];
   const case2Alert  = [];
   const case2Action = [];
@@ -177,10 +176,6 @@ async function run() {
     const { costInfo, bomRows } = cached;
 
     if (!costInfo.hasCost) {
-      if (db.wasProcessedThisWeek(itemCode, store, 1)) {
-        console.log(`[dedup] case1 skip ${itemCode}@${store} (alerted this week)`);
-        continue;
-      }
       case1.push(group);
     } else if (bomRows.length > 0) {
       if (config.phase >= 2) {
@@ -195,10 +190,6 @@ async function run() {
         }
         case2Action.push(...results);
       } else {
-        if (db.wasProcessedThisWeek(itemCode, store, 2)) {
-          console.log(`[dedup] case2 skip ${itemCode}@${store} (alerted this week)`);
-          continue;
-        }
         case2Alert.push({ ...group, bomRows });
       }
     } else {
@@ -214,10 +205,6 @@ async function run() {
         console.error(`[hana] findBomPathsFallback ${itemCode} failed:`, e.message);
       }
 
-      if (db.wasProcessedThisWeek(itemCode, store, 2)) {
-        console.log(`[dedup] case2-fallback skip ${itemCode}@${store} (alerted this week)`);
-        continue;
-      }
       case2Alert.push({ ...group, bomRows: fallbackRows });
     }
   }
@@ -230,7 +217,6 @@ async function run() {
         `[Portal MM] Caso 1 — ${case1.length} item(s) sem custo — sem histórico de entrada`,
         email.buildCase1Email(case1)
       );
-      for (const item of case1) db.markProcessed(item.itemCode, item.store, 1, 'alert');
     } catch (e) {
       console.error('[email] case1 send failed:', e.message);
     }
@@ -244,7 +230,6 @@ async function run() {
         `[Portal MM] Caso 2 — ${uniqueProducts} produto(s) sem custo — contribuição ínfima em ficha técnica`,
         email.buildCase2AlertEmail(case2Alert)
       );
-      for (const item of case2Alert) db.markProcessed(item.itemCode, item.store, 2, 'alert');
     } catch (e) {
       console.error('[email] case2 alert send failed:', e.message);
     }
