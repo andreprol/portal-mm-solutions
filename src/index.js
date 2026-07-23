@@ -19,7 +19,7 @@ hana.init(config.hana);
 email.init(config.graph, config.graph.fromEmail);
 
 const healthPort     = config.healthPort || 3849;
-const schedule_case3 = config.schedule_case3 || '30 6 * * *';
+const schedule_case3 = config.schedule_case3 || '0 13 * * *';
 const startedAt      = new Date().toISOString();
 const ADMIN_TOKEN    = config.adminToken || '';
 
